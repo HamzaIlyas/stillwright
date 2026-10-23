@@ -1,0 +1,23 @@
+{
+  "name": "stillwright",
+  "version": "0.1.0",
+  "description": "Quiet autonomous orchestrator for coding agents: learns you once, plans, finds and vets the right tools, proves every step, and only speaks when needed.",
+  "author": {
+    "name": "Hamza Ilyas",
+    "url": "https://github.com/HamzaIlyas"
+  },
+  "homepage": "https://github.com/HamzaIlyas/stillwright",
+  "repository": "https://github.com/HamzaIlyas/stillwright",
+  "license": "MIT",
+  "keywords": [
+    "agent",
+    "orchestrator",
+    "autonomous",
+    "skills",
+    "claude-code",
+    "codex",
+    "gemini-cli",
+    "opencode",
+    "verification"
+  ]
+}

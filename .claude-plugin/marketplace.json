@@ -1,0 +1,15 @@
+{
+  "name": "stillwright",
+  "description": "Stillwright: a quiet autonomous orchestrator for coding agents.",
+  "owner": {
+    "name": "Hamza Ilyas",
+    "url": "https://github.com/HamzaIlyas"
+  },
+  "plugins": [
+    {
+      "name": "stillwright",
+      "source": "./",
+      "description": "Quiet autonomous orchestrator for coding agents: learns you once, plans, finds and vets the right tools, proves every step, and only speaks when needed."
+    }
+  ]
+}

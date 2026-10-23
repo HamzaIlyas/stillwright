@@ -1,0 +1,5 @@
+{
+  "name": "stillwright",
+  "version": "0.1.0",
+  "description": "Quiet autonomous orchestrator for coding agents: learns you once, plans, finds and vets the right tools, proves every step, and only speaks when needed."
+}
