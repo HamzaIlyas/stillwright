@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.3 - 2026-10-24
 - press/ kit (logo, social card, horizontal and vertical demo clips, pitch, prompts) and docs/migrate.md (from OpenClaw or Hermes).
 - `sw init`: writes the repo-level settings that turn Stillwright on by default in Claude Code and GitHub Copilot.
 - README: `npx plugins add` / `npx skills add` one-liners; `.agents/skills` mirror; GitHub topics for the Gemini gallery.
