@@ -32,7 +32,7 @@ tasks, every agent's work and report, the Stillwright plans and logs, and the gr
 | research | Stillwright | yes | yes | no (22) | yes | 0 | 147 s | 87k |
 | research | plain | yes | yes | no (26) | no | 0 | 88 s | 73k |
 
-Wall time and tokens are the whole run, as reported by the harness.
+Wall time and tokens are the whole run, as reported by the harness; each run folder has a `timing.json` with them.
 
 ## What this says
 
@@ -80,7 +80,7 @@ column was not re-judged for this round.
 - Onboarding was skipped (no user to ask), so the profile and notes parts of the skill
   were not tested.
 - The grading script and the judge prompt were written by the skill's author. The judge is
-  a model, and its verdicts are in `runs/results.json` and the run folders for anyone to dispute.
+  a model, and its full report is in [`judge-false-claims.md`](evals/2026-10-24/judge-false-claims.md) for anyone to dispute.
 - One harness quirk: the plain research agent was refused permission to write its report
   file, so for fairness every agent's returned text was saved as its report by the eval
   runner, identically for all six.
