@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Homebrew: `brew install HamzaIlyas/tap/stillwright` (formula published to HamzaIlyas/homebrew-tap on each release).
 - sw-forge: forge only on logged triggers, evidence file required, old-vs-new eval before install, rollback copy, usage tracking and a retire card (design from SkillsBench, Hermes, Prime Agent, ECC, skill-creator).
 
 ## 0.1.3 - 2026-10-24
