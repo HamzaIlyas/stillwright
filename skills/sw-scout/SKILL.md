@@ -22,8 +22,8 @@ One sentence: the job, the inputs, the output, and how we'll know it worked (the
 ## 2. Search in order, stop when you have 3 good candidates
 
 1. **Already installed:** the session's skills and agents, `sw tool list`, project dependencies.
-   Then [references/vetted-tools.md](references/vetted-tools.md): tools already checked, with
-   the dates, so a common need skips the search (re-check anything older than a month).
+   Then [references/vetted-tools.md](references/vetted-tools.md): tools checked on the date at
+   the top of that file, so a common need skips the search. Re-check before pinning.
 2. **Official sources:** the harness's own marketplace, the vendor's docs and repos.
 3. **Registries:** skills.sh, the official MCP Registry, Docker MCP Catalog, package
    registries (npm, PyPI, crates.io).

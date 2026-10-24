@@ -1,8 +1,8 @@
 # Vetted tools (starter list)
 
 Checked on 2026-10-24: alive (pushed within the last two weeks), licensed, real code or real
-skills, no affiliate funnel. Re-check before use; pin after approval. Stars are from the
-GitHub API on that date and are not the reason for the pick.
+skills, no affiliate funnel. Pin after approval. Stars are from the
+GitHub API on that date and are not the reason for the pick. Re-check before pinning.
 
 | Need | Tool | License | Notes |
 |---|---|---|---|
