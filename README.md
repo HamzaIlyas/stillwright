@@ -1,11 +1,12 @@
 # Stillwright
 
-**A quiet maker for your coding agent.** It learns you once, then keeps working: it plans
-your goals, finds and vets the right tools, proves every step, and only speaks when it
+**A quiet maker for your AI agent.** It gets to know you, then keeps working on your goals:
+plans them, finds and vets the right tools, proves every step, and only speaks when it
 needs you, in five lines or fewer.
 
-Works with Claude Code, Codex, Gemini CLI, OpenCode and any agent that reads
-[Agent Skills](https://agentskills.io).
+Any goal with a way to check it: code, research, writing, launches, operations. It runs
+inside the agent you already use: Claude Code, Codex, Gemini CLI, OpenCode and any agent
+that reads [Agent Skills](https://agentskills.io).
 
 ## Why
 
