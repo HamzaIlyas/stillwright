@@ -4,7 +4,7 @@ description: Finds the best existing tool for a job (skill, plugin, MCP server, 
 license: MIT
 metadata:
   author: Hamza Ilyas
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # Scout

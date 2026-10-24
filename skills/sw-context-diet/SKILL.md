@@ -4,7 +4,7 @@ description: Keeps the agent's context window lean so long work stays sharp and 
 license: MIT
 metadata:
   author: Hamza Ilyas
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # Context diet

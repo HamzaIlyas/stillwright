@@ -4,7 +4,7 @@ description: Independent proof that a step is really done. Runs the step's agree
 license: MIT
 metadata:
   author: Hamza Ilyas
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # Verify

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 - 2026-10-24
 - README: badges, cited research behind each rule, Folvix link; issue and PR templates.
 - Codex-native marketplace file (.agents/plugins/marketplace.json); install table covers Cursor and OpenCode.
 - docs/quickstart.md, verified by scripts/check_docs.py in CI; examples/quickstart-run with the real run state.

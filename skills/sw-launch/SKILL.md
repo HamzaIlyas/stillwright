@@ -4,7 +4,7 @@ description: Marketing and launch for what the user builds. Finds who it's for, 
 license: MIT
 metadata:
   author: Hamza Ilyas
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # Launch
