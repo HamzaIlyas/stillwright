@@ -44,10 +44,11 @@ Wall time and tokens are the whole run, as reported by the harness.
 - **Stillwright caught its own mistake once.** In the writing task, its first draft added
   two things the user had not asked for. The fresh reviewer the skill requires failed that
   draft, the agent removed them, and the log shows fail → fix → pass. The plain run kept an
-  unrequested sentence and then claimed the facts were "kept exactly" when it had changed
-  the wording: the one false claim found.
-- **Stillwright broke its own five-line rule every time.** Reports were 8, 8 and 22 lines.
-  The one-line inbox cards it wrote were short; the report it returned was not. This is a
+  unrequested sentence and said the facts were "kept exactly" although it had changed the
+  wording, which it disclosed two lines later: the one false claim found, a mild one.
+- **Stillwright broke its own five-line rule every time.** Reports were 8, 8 and 22 lines
+  (the plain side's were 7, 8 and 26, but it had no such rule). The one-line inbox cards
+  were short; the report it returned was not. This is a
   real gap between the skill text and behaviour, and the next skill change targets it.
 - **It costs more**: roughly 1.7–2x the wall time and 10–20% more tokens, spent on the
   plan, the checks and the reviewer.
