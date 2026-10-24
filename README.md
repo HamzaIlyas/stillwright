@@ -89,13 +89,15 @@ v0.1. Each rule answers a failure that has been measured or reported, not a hunc
   Hence independent, default-fail checks.
 - Agents rarely ask for help at the right moment and fill gaps with wrong assumptions:
   [HiL-Bench](https://arxiv.org/abs/2604.09408). Hence the typed inbox with silence as default.
-- Reliability drops sharply on tasks longer than a few hours:
+- Agent success falls as tasks get longer; METR measures how long a task an agent completes
+  at 50% and at 80% reliability, and the 80% horizon is much shorter:
   [METR time horizons](https://metr.org/time-horizons/). Hence small, checkable steps.
 - Hundreds of malicious skills were found on a public skill registry in early 2026 (341 of 2,857 scanned):
-  [Snyk ToxicSkills](https://snyk.io/articles/skill-md-shell-access/),
-  [Unit 42](https://unit42.paloaltonetworks.com/openclaw-ai-supply-chain-risk/).
+  [Snyk, "From SKILL.md to Shell Access"](https://snyk.io/articles/skill-md-shell-access/),
+  [Unit 42 on the OpenClaw skill marketplace](https://unit42.paloaltonetworks.com/openclaw-ai-supply-chain-risk/).
   Hence vetting, approval and hash-pinning before any third-party tool runs.
-- Agents act on stale memory in most cases when a constraint has changed:
+- In a controlled test with a limited verification budget, agents followed a constraint that
+  had since been withdrawn in about three of four decisions:
   [arXiv 2608.25553](https://arxiv.org/abs/2608.25553). Hence dated notes that are retired, not overwritten.
 
 Issues and PRs welcome. Found a gap? Open an [idea](https://github.com/HamzaIlyas/stillwright/issues/new?template=idea.yml).
