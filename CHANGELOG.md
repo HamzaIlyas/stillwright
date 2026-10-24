@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- stillwright skill: the final message is the notify card text; five-line rule applies to it (gap found by the eval).
 - docs/evals.md: first measured comparison against a plain agent, with raw runs and grading script.
 - `pip install stillwright` (published to PyPI from 0.1.1).
 - Hermes Agent install row (drop-in to ~/.hermes/skills/).
