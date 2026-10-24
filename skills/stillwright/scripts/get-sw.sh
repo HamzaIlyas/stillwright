@@ -1,16 +1,25 @@
 #!/usr/bin/env sh
-# Puts the `sw` binary on PATH. Uses an existing one when found; otherwise downloads the
-# release for this OS/CPU from GitHub, checks its SHA-256, and installs it for the user.
+# Puts the `sw` binary on PATH (Linux and macOS; Windows users run the PowerShell line in
+# the README). Uses an existing `sw` when found; otherwise downloads the installer for the
+# pinned release below, so a run never executes whatever "latest" happens to be.
 set -eu
 REPO="HamzaIlyas/stillwright"
+VERSION="0.1.0"
 if command -v sw >/dev/null 2>&1; then
   echo "sw already installed: $(command -v sw)"
   exit 0
 fi
 if [ "${SW_FROM_SOURCE:-}" = "1" ] && command -v cargo >/dev/null 2>&1; then
-  cargo install stillwright --locked
+  cargo install --git "https://github.com/$REPO" --tag "v$VERSION" --locked
   exit 0
 fi
-echo "Installing sw from the latest GitHub release of $REPO..."
-curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/$REPO/releases/latest/download/stillwright-installer.sh" | sh
-echo "Done. Open a new shell if 'sw' is not found yet."
+URL="https://github.com/$REPO/releases/download/v$VERSION/stillwright-installer.sh"
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
+echo "Downloading sw v$VERSION installer..."
+if ! curl --proto '=https' --tlsv1.2 -fsSL "$URL" -o "$TMP"; then
+  echo "download failed: $URL" >&2
+  exit 1
+fi
+sh "$TMP"
+command -v sw >/dev/null 2>&1 || echo "Installed. Open a new shell so 'sw' is on PATH."

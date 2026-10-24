@@ -9,7 +9,7 @@ metadata:
 
 # Onboard
 
-`sw` below is the Stillwright binary. If `sw` is not on PATH, run `scripts/get-sw.sh` from the `stillwright` skill's folder once (it downloads the release for this machine and checks its hash).
+`sw` below is the Stillwright binary. If `sw` is not on PATH, follow the install note in the `stillwright` skill (ask the user first; never install unattended).
 
 Goal: enough understanding to work for days without asking basic questions, gathered in
 **at most three short rounds**. People quit long questionnaires, so look first and ask second.

@@ -9,7 +9,7 @@ metadata:
 
 # Verify
 
-`sw` below is the Stillwright binary. If `sw` is not on PATH, run `scripts/get-sw.sh` from the `stillwright` skill's folder once (it downloads the release for this machine and checks its hash).
+`sw` below is the Stillwright binary. If `sw` is not on PATH, follow the install note in the `stillwright` skill (ask the user first; never install unattended).
 
 Agents regularly report work as done when it isn't: tests skipped, UI visibly broken, a
 claim nobody checked. The worker's own report is evidence to check, never the verdict.

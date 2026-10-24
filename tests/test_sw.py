@@ -80,6 +80,27 @@ class RunTests(SwTestCase):
         (run / "log.jsonl").write_text("not json\n" + json.dumps({"step": "1", "result": "pass"}) + "\n")
         self.assertIn("none, all passed", self.sw("run", "status"))
 
+    def test_log_refuses_folders_outside_runs(self):
+        self.sw("run", "new", "x")
+        outside = self.home / "notarun"
+        outside.mkdir()
+        with self.assertRaises(Failed):
+            self.sw("run", "log", str(outside), "step=1", "result=pass")
+        self.assertFalse((outside / "log.jsonl").exists())
+
+    def test_run_reference_matches_slug_not_suffix(self):
+        self.sw("run", "new", "alpha-1")
+        self.sw("run", "new", "beta")
+        self.assertIn("alpha-1", self.sw("run", "status", "alpha-1"))
+        with self.assertRaises(Failed):
+            self.sw("run", "status", "1")
+
+    def test_passed_counts_only_plan_steps(self):
+        run = pathlib.Path(self.sw("run", "new", "x").strip())
+        (run / "plan.md").write_text("1. a | check: true\n")
+        self.sw("run", "log", "latest", "step=9", "result=pass")
+        self.assertIn("0/1 steps passed", self.sw("run", "status"))
+
     def test_log_requires_key_value(self):
         self.sw("run", "new", "x")
         with self.assertRaises(Failed):
@@ -110,6 +131,12 @@ class InboxTests(SwTestCase):
         self.sw("inbox", "close", "1")
         self.assertIn("inbox empty", self.sw("inbox", "list"))
         self.assertIn("answer: yes", self.sw("inbox", "show", "1"))
+
+    def test_closed_card_cannot_be_answered(self):
+        self.sw("inbox", "add", "ask", "q")
+        self.sw("inbox", "close", "1")
+        with self.assertRaises(Failed):
+            self.sw("inbox", "answer", "1", "late")
 
     def test_rejects_unknown_kind(self):
         with self.assertRaises(Failed):
@@ -157,15 +184,14 @@ class ToolTests(SwTestCase):
         self.sw("tool", "pin", "t", str(tool), "--force")
         self.assertIn("t: ok", self.sw("tool", "check"))
 
-    def test_hash_ignores_caches(self):
+    def test_hash_covers_nested_dependency_dirs(self):
         tool = self.home / "c"
-        tool.mkdir()
-        (tool / "a.py").write_text("a")
-        before = self.hash_of(tool)
-        (tool / "__pycache__").mkdir()
-        (tool / "__pycache__" / "a.pyc").write_bytes(b"x")
-        (tool / ".DS_Store").write_bytes(b"x")
-        self.assertEqual(before, self.hash_of(tool))
+        (tool / "node_modules").mkdir(parents=True)
+        (tool / "node_modules" / "m.js").write_text("v1")
+        self.sw("tool", "pin", "c", str(tool))
+        (tool / "node_modules" / "m.js").write_text("v2")
+        with self.assertRaises(Failed):
+            self.sw("tool", "check")
 
     def test_hash_ignores_git_dir(self):
         tool = self.home / "t"
@@ -188,6 +214,8 @@ class StatusTests(SwTestCase):
     def test_status_summarises(self):
         out = self.sw("status")
         self.assertIn("profile: missing", out)
+        self.sw("run", "new", "x")
+        self.assertIn("next: write plan.md", self.sw("status"))
         (self.home / "profile.md").write_text("# Profile")
         self.sw("goal", "add", "g")
         self.sw("inbox", "add", "ask", "q")

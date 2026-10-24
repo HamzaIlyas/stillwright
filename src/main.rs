@@ -18,14 +18,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const HASH_SKIP: &[&str] = &[
-    ".git",
-    "__pycache__",
-    "node_modules",
-    ".DS_Store",
-    ".venv",
-    "target",
-];
+/// Only VCS metadata is left out of a tool's hash: anything else (caches, vendored
+/// dependencies, build output) can carry code the tool will run, so it must count.
+const HASH_SKIP: &[&str] = &[".git"];
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -340,12 +335,21 @@ impl Store {
         }
         let path = PathBuf::from(reference);
         if path.is_dir() {
-            return Ok(path);
+            let runs_dir = fs::canonicalize(self.root.join("runs")).map_err(|e| e.to_string())?;
+            let given = fs::canonicalize(&path).map_err(|e| e.to_string())?;
+            if given.parent() == Some(runs_dir.as_path()) {
+                return Ok(given);
+            }
+            return Err(format!(
+                "{reference} is not a run folder under {}",
+                runs_dir.display()
+            ));
         }
+        // Exact folder name, or the slug after the "YYYYMMDD-HHMMSS-" prefix; newest wins.
         runs.into_iter()
             .rfind(|p| {
                 let name = file_name(p);
-                name == reference || name.ends_with(reference)
+                name == reference || name.get(16..) == Some(reference)
             })
             .ok_or_else(|| format!("no run matching {reference}"))
     }
@@ -430,7 +434,7 @@ fn value_str(v: &serde_json::Value) -> String {
 
 struct Progress {
     next: Option<String>,
-    total: usize,
+    steps: Vec<String>,
     results: BTreeMap<String, String>,
 }
 
@@ -446,13 +450,29 @@ impl Progress {
             .cloned();
         Progress {
             next,
-            total: steps.len(),
+            steps,
             results,
         }
     }
 
+    fn total(&self) -> usize {
+        self.steps.len()
+    }
+
     fn passed(&self) -> usize {
-        self.results.values().filter(|r| *r == "pass").count()
+        self.steps
+            .iter()
+            .filter(|s| self.results.get(*s).map(String::as_str) == Some("pass"))
+            .count()
+    }
+
+    /// What to do next, worded the same everywhere it is shown.
+    fn next_label(&self) -> String {
+        match (&self.next, self.total()) {
+            (Some(s), _) => format!("step {s}"),
+            (None, 0) => "write plan.md".into(),
+            (None, _) => "none, all passed".into(),
+        }
     }
 }
 
@@ -583,11 +603,11 @@ fn status(store: &Store) -> Result<()> {
     println!("{line}");
     if let Some(last) = store.runs()?.last() {
         let progress = Progress::of(last);
-        let next = progress
-            .next
-            .map(|s| format!("step {s}"))
-            .unwrap_or_else(|| "done".into());
-        println!("last run: {} next: {next}", file_name(last));
+        println!(
+            "last run: {} next: {}",
+            file_name(last),
+            progress.next_label()
+        );
     }
     Ok(())
 }
@@ -683,7 +703,7 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                 "{}: {}/{} steps passed",
                 file_name(&dir),
                 p.passed(),
-                p.total
+                p.total()
             );
             let mut failing: Vec<(&String, &String)> =
                 p.results.iter().filter(|(_, r)| *r != "pass").collect();
@@ -691,18 +711,13 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             for (step, result) in failing {
                 println!("  step {step}: {result}");
             }
-            let next = match (&p.next, p.total) {
-                (Some(s), _) => format!("step {s}"),
-                (None, 0) => "write plan.md".into(),
-                (None, _) => "none, all passed".into(),
-            };
-            println!("next: {next}");
+            println!("next: {}", p.next_label());
         }
         RunCmd::List => {
             let runs = store.runs()?;
             for dir in runs.iter().rev().take(10).rev() {
                 let p = Progress::of(dir);
-                println!("{}  {}/{}", file_name(dir), p.passed(), p.total);
+                println!("{}  {}/{}", file_name(dir), p.passed(), p.total());
             }
         }
     }
@@ -767,6 +782,12 @@ fn inbox(store: &Store, cmd: InboxCmd) -> Result<()> {
         }
         InboxCmd::Answer { id, answer } => {
             let c = find(&mut cards, id, |c| c.id)?;
+            if c.status != "open" {
+                return Err(format!(
+                    "inbox {id} is {}, only open cards can be answered",
+                    c.status
+                ));
+            }
             c.status = "answered".into();
             c.answer = Some(answer);
             c.answered = Some(now());

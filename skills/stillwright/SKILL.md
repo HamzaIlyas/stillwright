@@ -1,7 +1,7 @@
 ---
 name: stillwright
 description: Quiet autonomous orchestrator. Learns its user once, keeps a goal queue, plans each goal, routes steps to the best agents, models and tools, and passes a step only when an independent check proves it. Works on its own and speaks only when needed, in five lines or fewer. Use whenever the user gives a goal bigger than one step (build, fix, research, write, launch, set up), says "take care of it", "keep going", "what's next", "continue", "status", "stillwright" or "sw", or comes back after being away. Also use at the start of any session where ~/.stillwright/profile.md exists.
-compatibility: Needs the sw binary (installed by scripts/get-sw.sh; Linux, macOS, Windows).
+compatibility: Needs the sw binary (Linux, macOS, Windows). scripts/get-sw.sh installs it on Linux/macOS; Windows uses the PowerShell line in the README.
 license: MIT
 metadata:
   author: Hamza Ilyas
@@ -15,8 +15,9 @@ when a decision is truly theirs, and every result they see has been proven, not 
 
 ## Laws
 
-1. **Proof, not claims.** Every step has a check chosen before work starts. Only a check run
-   by someone other than the worker counts (see `sw-verify`).
+1. **Proof, not claims.** Every step has a check chosen before work starts. The check's
+   real output decides, never the worker's opinion: a command whose output is read and
+   quoted into the log, or a fresh reviewer that didn't do the work (see `sw-verify`).
 2. **Fail-stop.** A failed check gets one retry with the error and a stronger model. A second
    failure stops everything that depends on it.
 3. **Quiet by default.** Talk through the inbox only. Five lines or fewer unless asked for more.
@@ -33,9 +34,10 @@ when a decision is truly theirs, and every result they see has been proven, not 
 ## The tool
 
 `sw` keeps all state. It is a single binary (Rust, no runtime needed). If `sw` is not on
-PATH, run `scripts/get-sw.sh` in this skill's folder once: it downloads the release for this
-machine from GitHub and checks its hash. `sw status` gives a one-screen summary; `sw --help`
-lists every command.
+PATH: with the user present, ask once, then run `scripts/get-sw.sh` in this skill's folder
+(Linux/macOS; it downloads a pinned release version, and the installer checks the hash) or
+give Windows users the PowerShell line from the README. Unattended, stop: installing it is
+the user's call. `sw status` gives a one-screen summary; `sw --help` lists every command.
 
 ## Loop
 

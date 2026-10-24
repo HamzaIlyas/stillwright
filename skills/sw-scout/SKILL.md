@@ -9,7 +9,7 @@ metadata:
 
 # Scout
 
-`sw` below is the Stillwright binary. If `sw` is not on PATH, run `scripts/get-sw.sh` from the `stillwright` skill's folder once (it downloads the release for this machine and checks its hash).
+`sw` below is the Stillwright binary. If `sw` is not on PATH, follow the install note in the `stillwright` skill (ask the user first; never install unattended).
 
 The AI tool world has tens of thousands of skills, MCP servers and repos, many abandoned and
 some malicious (hundreds of malicious skills were found on public registries in 2026). Pick

@@ -26,3 +26,4 @@ Hourly at most. Each run should do one goal step or one radar pass, not everythi
 - An empty run (nothing to do, nothing changed) writes nothing and sends nothing.
 - Every run ends with the run log updated, so the next session can resume without guessing.
 - If `sw tool check` reports a changed tool, stop using it and add a `review` card.
+- If `sw` itself is missing, stop. Installing it is the user's decision, not a scheduled run's.

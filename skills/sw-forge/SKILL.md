@@ -9,7 +9,7 @@ metadata:
 
 # Forge
 
-`sw` below is the Stillwright binary. If `sw` is not on PATH, run `scripts/get-sw.sh` from the `stillwright` skill's folder once (it downloads the release for this machine and checks its hash).
+`sw` below is the Stillwright binary. If `sw` is not on PATH, follow the install note in the `stillwright` skill (ask the user first; never install unattended).
 
 Build the smallest thing that passes the need's check. A forged skill is code we vouch for,
 so it's held to the same proof rules as everything else.

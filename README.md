@@ -28,11 +28,16 @@ Works with Claude Code, Codex, Gemini CLI, OpenCode and any agent that reads
 The skills need the `sw` binary (a single file, no runtime). Any of these installs it:
 
 ```sh
+# Linux / macOS
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/HamzaIlyas/stillwright/releases/latest/download/stillwright-installer.sh | sh
-cargo install stillwright
+# Windows (PowerShell)
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/HamzaIlyas/stillwright/releases/latest/download/stillwright-installer.ps1 | iex"
+# From source (needs Rust)
+cargo install --git https://github.com/HamzaIlyas/stillwright --locked
 ```
 
-The skills also install it themselves on first use (`scripts/get-sw.sh`).
+On Linux and macOS the skills can also install it on first use (`scripts/get-sw.sh`, pinned
+to a release version), when you are present to approve it.
 
 ## Use
 

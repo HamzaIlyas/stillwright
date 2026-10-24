@@ -63,6 +63,9 @@ def check_manifests() -> list:
     market = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text())
     if not any(p.get("name") == "stillwright" for p in market.get("plugins", [])):
         problems.append("marketplace.json: stillwright plugin missing")
+    installer = (ROOT / "skills/stillwright/scripts/get-sw.sh").read_text()
+    if f'VERSION="{version}"' not in installer:
+        problems.append("get-sw.sh: pinned VERSION does not match VERSION file")
     cargo = (ROOT / "Cargo.toml").read_text()
     if f'\nversion = "{version}"' not in cargo:
         problems.append("Cargo.toml: version does not match VERSION")

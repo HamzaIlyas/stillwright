@@ -9,7 +9,7 @@ metadata:
 
 # Context diet
 
-`sw` below is the Stillwright binary. If `sw` is not on PATH, run `scripts/get-sw.sh` from the `stillwright` skill's folder once (it downloads the release for this machine and checks its hash).
+`sw` below is the Stillwright binary. If `sw` is not on PATH, follow the install note in the `stillwright` skill (ask the user first; never install unattended).
 
 Quality drops and cost rises as context fills: early decisions get lost and huge outputs
 crowd out the task. Treat context as the scarcest resource in the run.

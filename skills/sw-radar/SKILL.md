@@ -9,7 +9,7 @@ metadata:
 
 # Radar
 
-`sw` below is the Stillwright binary. If `sw` is not on PATH, run `scripts/get-sw.sh` from the `stillwright` skill's folder once (it downloads the release for this machine and checks its hash).
+`sw` below is the Stillwright binary. If `sw` is not on PATH, follow the install note in the `stillwright` skill (ask the user first; never install unattended).
 
 Being proactive is only useful if it's rare and right. Proactive agents usually fail by
 speaking when they have nothing worth saying. Default output: **nothing**.
