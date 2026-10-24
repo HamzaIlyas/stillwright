@@ -1,0 +1,5 @@
+{"event":"start","goal":"1","ts":"2026-10-24T15:54:44"}
+{"check":"wc -w<=80 and grep four facts","note":"46 words; 2021, Lahore, more than 400 businesses in Pakistan, under 50 orders a month each found once","result":"pass","step":"1","ts":"2026-10-24T15:55:08","who":"self"}
+{"check":"reviewer lists promotional words; checks facts vs original","note":"no marketing adjectives, but two unrequested additions (1.2M orders clause, automation software sentence); removed both","result":"fail","step":"2","ts":"2026-10-24T15:55:41","who":"fresh read-only reviewer (Explore)"}
+{"check":"wc -w<=80 and grep four facts, rerun after removing extras","note":"rewrite.md now 3 sentences; four facts present once each; check unchanged","result":"pass","step":"1","ts":"2026-10-24T15:55:41","who":"self"}
+{"check":"reviewer lists promotional words; checks facts vs original","note":"no promotional words, 31 words, four facts present, nothing unsupported","result":"pass","step":"2","ts":"2026-10-24T15:56:03","who":"fresh read-only reviewer (Explore), retry"}

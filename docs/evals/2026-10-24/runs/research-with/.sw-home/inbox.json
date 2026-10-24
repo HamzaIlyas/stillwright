@@ -1,0 +1,11 @@
+[
+  {
+    "id": 1,
+    "kind": "notify",
+    "title": "stillwright: PyPI and GitHub both at 0.1.1 (match); GitHub release 2026-10-24",
+    "body": "Proof: REPORT.md; https://pypi.org/pypi/stillwright/json ; https://api.github.com/repos/HamzaIlyas/stillwright/releases/latest",
+    "run": "latest",
+    "status": "open",
+    "created": "2026-10-24T15:55:56"
+  }
+]

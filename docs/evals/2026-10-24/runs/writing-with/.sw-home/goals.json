@@ -1,0 +1,11 @@
+[
+  {
+    "id": 1,
+    "text": "Rewrite original.md as plain English, max 80 words, keep four facts, no marketing adjectives",
+    "priority": 3,
+    "status": "done",
+    "created": "2026-10-24T15:54:39",
+    "closed": "2026-10-24T15:56:03",
+    "note": ""
+  }
+]

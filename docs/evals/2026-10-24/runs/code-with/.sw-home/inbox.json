@@ -1,0 +1,11 @@
+[
+  {
+    "id": 1,
+    "kind": "notify",
+    "title": "Fixed FLAT5 going negative; 5/5 tests pass",
+    "body": "pricing.py: max(subtotal - 5, 0). unittest OK, tests file hash unchanged.",
+    "run": "",
+    "status": "open",
+    "created": "2026-10-24T15:55:21"
+  }
+]

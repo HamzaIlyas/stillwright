@@ -109,6 +109,11 @@ v0.1. Each rule answers a failure that has been measured or reported, not a hunc
   had since been withdrawn in about three of four decisions:
   [arXiv 2608.25553](https://arxiv.org/abs/2608.25553). Hence dated notes that are retired, not overwritten.
 
+Measured on three small tasks against a plain agent of the same model: same task completion,
+an auditable plan and log every time, zero false claims (the plain side had one), and
+reports that broke the five-line rule every time. Numbers, caveats and raw runs:
+[docs/evals.md](docs/evals.md).
+
 Issues and PRs welcome. Found a gap? Open an [idea](https://github.com/HamzaIlyas/stillwright/issues/new?template=idea.yml).
 
 MIT © Hamza Ilyas · Built at [Folvix](https://huggingface.co/Folvix).

@@ -1,0 +1,1 @@
+We make software that automates work across the customer lifecycle for businesses. The company was founded in 2021 and is headquartered in Lahore. It serves more than 400 businesses in Pakistan and processes roughly 1.2 million orders a month. Shops with fewer than 50 orders a month can use a free plan.
