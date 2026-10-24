@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "stillwright"
+description = "sw, the state keeper for the Stillwright agent skills: goals, runs, inbox, dated notes, hash-pinned tools"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.8"
+authors = [{ name = "Hamza Ilyas" }]
+keywords = ["agent", "orchestrator", "ai", "skills", "cli"]
+classifiers = [
+  "Environment :: Console",
+  "Programming Language :: Rust",
+  "Topic :: Software Development",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/HamzaIlyas/stillwright"
+Changelog = "https://github.com/HamzaIlyas/stillwright/blob/main/CHANGELOG.md"
+
+[tool.maturin]
+bindings = "bin"
+strip = true

@@ -4,6 +4,8 @@
 [![Release](https://img.shields.io/github/v/release/HamzaIlyas/stillwright)](https://github.com/HamzaIlyas/stillwright/releases/latest)
 [![License](https://img.shields.io/github/license/HamzaIlyas/stillwright)](LICENSE)
 
+![sw status, a run two steps in, one review card answered, two goals](assets/demo.gif)
+
 **A quiet maker for your AI agent.** It gets to know you, then keeps working on your goals:
 plans them, finds and vets the right tools, proves every step, and only speaks when it
 needs you, in five lines or fewer.

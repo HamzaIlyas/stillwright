@@ -5,6 +5,7 @@
 - Codex-native marketplace file (.agents/plugins/marketplace.json); install table covers Cursor and OpenCode.
 - docs/quickstart.md, verified by scripts/check_docs.py in CI; examples/quickstart-run with the real run state.
 - docs/troubleshooting.md and docs/windows.md.
+- Demo GIF in README; `pip install stillwright` packaging (maturin) with a PyPI Trusted Publishing workflow.
 
 ## 0.1.0 - 2026-10-23
 - First release: the `stillwright` loop and eight `sw-*` skills.
