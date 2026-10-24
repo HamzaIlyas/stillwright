@@ -1,0 +1,1 @@
+The company was founded in 2021 and is headquartered in Lahore. It makes software that automates work for businesses, and it serves more than 400 businesses in Pakistan. Shops with fewer than 50 orders a month can use a free plan.

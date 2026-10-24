@@ -112,7 +112,8 @@ v0.1. Each rule answers a failure that has been measured or reported, not a hunc
 Measured on three small tasks against a plain agent of the same model: same task completion,
 an auditable plan and log every time, zero false claims (the plain side had one mild one),
 about twice the wall time, and reports that broke the five-line rule every time (as did the
-plain side's). Numbers, caveats and raw runs: [docs/evals.md](docs/evals.md).
+plain side's). After one skill fix, a re-run met the rule in all three tasks. Numbers,
+caveats and raw runs: [docs/evals.md](docs/evals.md).
 
 Issues and PRs welcome. Found a gap? Open an [idea](https://github.com/HamzaIlyas/stillwright/issues/new?template=idea.yml).
 

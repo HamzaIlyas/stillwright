@@ -1,0 +1,11 @@
+[
+  {
+    "id": 1,
+    "kind": "notify",
+    "title": "Tests pass: FLAT5 now clamps at zero",
+    "body": "Fixed apply_discount in pricing.py: max(subtotal - 5, 0). Proof: unittest ran 5 tests, OK. tests/ unchanged (hash matches).",
+    "run": "",
+    "status": "open",
+    "created": "2026-10-24T16:21:31"
+  }
+]

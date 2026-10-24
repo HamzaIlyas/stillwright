@@ -1,0 +1,4 @@
+{"event":"start","goal":"1","ts":"2026-10-24T16:21:19"}
+{"check":"PyPI JSON info.version","note":"HTTP 200, version 0.1.1, only release, uploaded 2026-10-24T10:48Z","result":"pass","step":"1","ts":"2026-10-24T16:21:44","who":"self"}
+{"check":"GitHub releases/latest","note":"HTTP 200, v0.1.1, published_at 2026-10-24T10:49:05Z","result":"pass","step":"2","ts":"2026-10-24T16:21:44","who":"self"}
+{"check":"human pages show same data","note":"GitHub release page title/datetime match; pypi.org/project page returned a Client Challenge so the JSON API is the PyPI source","result":"pass","step":"3","ts":"2026-10-24T16:21:49","who":"self"}

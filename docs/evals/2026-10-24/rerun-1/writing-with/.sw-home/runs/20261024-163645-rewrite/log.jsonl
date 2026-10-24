@@ -1,0 +1,4 @@
+{"event":"start","goal":"1","ts":"2026-10-24T16:36:45"}
+{"check":"wc -w <= 80","note":"41 words","result":"pass","step":"1","ts":"2026-10-24T16:36:57","who":"self"}
+{"check":"grep four facts + banned words","note":"first draft: 'More than 400 businesses in Pakistan' capitalised, exact-phrase grep missed (0 matches); other facts and banned-word grep passed","result":"fail","step":"2","ts":"2026-10-24T16:36:57","who":"self"}
+{"check":"grep four facts + banned words (retry)","note":"retry: all 5 phrase greps =1, no banned words, 41 words","result":"pass","step":"2","ts":"2026-10-24T16:36:57","who":"self"}

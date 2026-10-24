@@ -1,0 +1,11 @@
+[
+  {
+    "id": 1,
+    "kind": "notify",
+    "title": "stillwright latest: PyPI 0.1.1 = GitHub v0.1.1 (match); GitHub release published 2026-10-24T10:49:05Z",
+    "body": "PyPI 0.1.1 (only release): https://pypi.org/pypi/stillwright/json\nGitHub v0.1.1: https://api.github.com/repos/HamzaIlyas/stillwright/releases/latest\nRelease date 2026-10-24 10:49:05 UTC, page: https://github.com/HamzaIlyas/stillwright/releases/tag/v0.1.1\nNot confirmed: pypi.org/project/stillwright/ gave a bot challenge page.",
+    "run": "latest",
+    "status": "open",
+    "created": "2026-10-24T16:21:49"
+  }
+]

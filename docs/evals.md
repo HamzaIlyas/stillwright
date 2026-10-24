@@ -53,6 +53,24 @@ Wall time and tokens are the whole run, as reported by the harness.
 - **It costs more**: roughly 1.7–2x the wall time and 10–20% more tokens, spent on the
   plan, the checks and the reviewer.
 
+## Re-run after the skill change (same day)
+
+The five-line failure led to one change: the skill now says the final message *is* the
+notify card's text, and two helper skills (deep-search, scout) were told to keep their
+reports inside that limit. The three Stillwright runs were repeated with the changed skill
+(the plain side was not re-run; nothing changed for it). Raw runs: [`rerun-1/`](evals/2026-10-24/rerun-1/).
+
+| Task | done | evidence | 5 lines or fewer | plan + log | wall time | tokens |
+|---|---|---|---|---|---|---|
+| code | yes | yes | yes (4) | yes | 33 s | 76k |
+| writing | yes | yes | yes (3) | yes | 40 s | 77k |
+| research | yes | yes | yes (4) | yes | 53 s | 79k |
+
+All three now meet the rule, with the proof still in the message (test output, word count
+and fact check, URLs). Wall time also dropped to about half of the plain runs' first-round
+times; one re-run is not enough to say that is real rather than variance. The "false claims"
+column was not re-judged for this round.
+
 ## Limits of this eval
 
 - Three tasks, one run each per side. Enough to see patterns, not to put error bars on them.

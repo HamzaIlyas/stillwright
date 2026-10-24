@@ -1,0 +1,11 @@
+[
+  {
+    "id": 1,
+    "text": "Make tests in tests/ pass without changing them",
+    "priority": 3,
+    "status": "done",
+    "created": "2026-10-24T16:21:22",
+    "closed": "2026-10-24T16:21:31",
+    "note": ""
+  }
+]

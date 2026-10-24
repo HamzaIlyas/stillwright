@@ -66,11 +66,13 @@ def run_logged(run):
     return bool(logs and plans and passed), f"plans={len(plans)} logs={len(logs)} pass_logged={passed}"
 
 
-def main():
+def main(runs_dir="runs"):
     results = {}
     for task in ("code", "writing", "research"):
         for mode in ("with", "without"):
-            run = E / "runs" / f"{task}-{mode}"
+            run = E / runs_dir / f"{task}-{mode}"
+            if not run.exists():
+                continue
             done, d1 = task_done(task, run)
             ev, d2 = evidence_in_report(task, run)
             short = len(lines(report(run))) <= 5
@@ -81,11 +83,12 @@ def main():
                 "report_5_lines_or_fewer": short, "report_lines": len(lines(report(run))),
                 "run_logged_with_pass": logged, "log_detail": d3,
             }
-    (E / "results.json").write_text(json.dumps(results, indent=2))
+    (E / runs_dir / "results.json").write_text(json.dumps(results, indent=2))
     print(f"{'run':18} {'done':5} {'evidence':8} {'<=5 lines':9} {'logged':6}")
     for k, v in results.items():
         print(f"{k:18} {str(v['task_done']):5} {str(v['evidence_in_report']):8} {str(v['report_5_lines_or_fewer']):9} {str(v['run_logged_with_pass']):6}")
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    main(sys.argv[1] if len(sys.argv) > 1 else "runs")
