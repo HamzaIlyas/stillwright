@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- sw-forge: forge only on logged triggers, evidence file required, old-vs-new eval before install, rollback copy, usage tracking and a retire card (design from SkillsBench, Hermes, Prime Agent, ECC, skill-creator).
+
 ## 0.1.3 - 2026-10-24
 - press/ kit (logo, social card, horizontal and vertical demo clips, pitch, prompts) and docs/migrate.md (from OpenClaw or Hermes).
 - `sw init`: writes the repo-level settings that turn Stillwright on by default in Claude Code and GitHub Copilot.
