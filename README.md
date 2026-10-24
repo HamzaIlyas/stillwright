@@ -37,6 +37,8 @@ that reads [Agent Skills](https://agentskills.io).
 The skills need the `sw` binary (a single file, no runtime). Any of these installs it:
 
 ```sh
+# Any OS with Python
+pip install stillwright
 # Linux / macOS
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/HamzaIlyas/stillwright/releases/latest/download/stillwright-installer.sh | sh
 # Windows (PowerShell)

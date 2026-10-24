@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- `pip install stillwright` (published to PyPI from 0.1.1).
 - Hermes Agent install row (drop-in to ~/.hermes/skills/).
 
 ## 0.1.1 - 2026-10-24
