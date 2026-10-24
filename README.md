@@ -32,6 +32,7 @@ that reads [Agent Skills](https://agentskills.io).
 | Gemini CLI | `gemini extensions install https://github.com/HamzaIlyas/stillwright` |
 | Cursor | loads the root `plugin.json` (Agent Plugins standard); marketplace listing pending |
 | OpenCode, or any Agent Skills agent | `npx skills add HamzaIlyas/stillwright` |
+| Hermes Agent | `git clone --depth 1 https://github.com/HamzaIlyas/stillwright /tmp/stillwright && mkdir -p ~/.hermes/skills/stillwright && cp -R /tmp/stillwright/skills/. ~/.hermes/skills/stillwright/` (picked up on the next message; `/skills list` shows them) |
 
 The skills need the `sw` binary (a single file, no runtime). Any of these installs it:
 
