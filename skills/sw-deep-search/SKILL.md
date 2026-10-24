@@ -40,4 +40,5 @@ a word limit for its report. Use different kinds of sources:
 
 Lead with the answer in a few lines, then the evidence: each key claim with its source link.
 End with "Unverified:" if anything is. For a long report, write it to a file and give the
-user the short answer plus the path.
+user the short answer plus the path. Under `stillwright`, the final message is the five-line
+card; the evidence goes in a file the card points to.

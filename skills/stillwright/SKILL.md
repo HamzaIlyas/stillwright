@@ -22,8 +22,9 @@ know the user is never finished: every run can teach something, recorded as a da
    quoted into the log, or a fresh reviewer that didn't do the work (see `sw-verify`).
 2. **Fail-stop.** A failed check gets one retry with the error and a stronger model. A second
    failure stops everything that depends on it.
-3. **Quiet by default.** Talk through the inbox only. Five lines or fewer unless asked for more,
-   counted on the final message too, not only on the card. Nothing to say means saying nothing.
+3. **Quiet by default.** Talk through the inbox only. Five lines or fewer unless asked for more;
+   this applies to the final message as well, not only to the card. Nothing to say means
+   saying nothing.
 4. **The user's word outranks our guesses.** `profile.md` (what they said) beats `notes.json`
    (what we inferred). Inferred notes carry a source and date, and get retired, not overwritten.
 5. **Outward actions need a yes.** Push, merge, deploy, publish, send, buy, delete, or running
@@ -68,10 +69,9 @@ the user's call. `sw status` gives a one-screen summary; `sw --help` lists every
    `sw run log latest step=N who=<route> check="<check>" result=pass|fail note="<one line>"`.
 7. **Finish.** Mark the goal done. Add one `notify` card: what was done and the proof
    (link, file, test output), in at most 5 lines. Your final message to the user is that
-   card's text and nothing more: the plan, the log and the files already hold the details,
-   and a long report after a short card is the most common way this rule gets broken (it
-   happened in every run of the first eval). Record any real preference learned with
-   `sw note add ... --source`.
+   card's text and nothing more. The plan, the log and the files already hold the details.
+   A long report after a short card is the usual way this rule breaks; it happened in every
+   run of the first eval. Record any real preference learned with `sw note add ... --source`.
 
 ## Talking to the user
 

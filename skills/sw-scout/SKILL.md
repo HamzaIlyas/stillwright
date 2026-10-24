@@ -60,5 +60,5 @@ any silent change. A changed tool gets re-vetted before its next use.
 
 ## Report
 
-One line per candidate: name, why picked or rejected. Then the pick. If none pass, hand the
-need to `sw-forge`.
+One line per candidate: name, why picked or rejected, five lines at most (more candidates go
+in a file). Then the pick. If none pass, hand the need to `sw-forge`.
