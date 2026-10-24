@@ -602,7 +602,7 @@ const MARKETPLACE_REPO: &str = "HamzaIlyas/stillwright";
 fn enable_in_settings(path: &Path) -> Result<bool> {
     let mut root: serde_json::Value = match fs::read_to_string(path) {
         Ok(text) if text.trim().is_empty() => serde_json::json!({}),
-        Ok(text) => serde_json::from_str(&text).map_err(|e| {
+        Ok(text) => serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| {
             format!(
                 "{} is not valid JSON ({e}); fix it, then retry",
                 path.display()
@@ -641,10 +641,14 @@ fn enable_in_settings(path: &Path) -> Result<bool> {
             path.display()
         ));
     }
-    plugins.as_object_mut().expect("checked").insert(
-        format!("{MARKETPLACE}@{MARKETPLACE}"),
-        serde_json::Value::Bool(true),
-    );
+    let key = format!("{MARKETPLACE}@{MARKETPLACE}");
+    let plugins = plugins.as_object_mut().expect("checked");
+    if plugins.get(&key) == Some(&serde_json::Value::Bool(false)) {
+        // Someone turned it off here on purpose; init never overrides that.
+        println!("{}: {key} is false, left as is", path.display());
+    } else {
+        plugins.insert(key, serde_json::Value::Bool(true));
+    }
     if root == before {
         return Ok(false);
     }

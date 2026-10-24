@@ -248,9 +248,6 @@ class StatusTests(SwTestCase):
         self.assertIn("ask 1", out)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class InitTests(SwTestCase):
     def test_init_writes_both_settings_files(self):
@@ -287,3 +284,28 @@ class InitTests(SwTestCase):
             self.sw("init", "--dir", str(repo))
         with self.assertRaises(Failed):
             self.sw("init", "--dir", str(self.home / "nope"))
+
+    def test_init_respects_opt_out_and_keeps_key_order(self):
+        repo = self.home / "repo"
+        (repo / ".claude").mkdir(parents=True)
+        (repo / ".claude" / "settings.json").write_text(
+            '{"zeta": 1, "alpha": 2, "enabledPlugins": {"stillwright@stillwright": false}}')
+        out = self.sw("init", "--dir", str(repo), "--claude-only")
+        self.assertIn("left as is", out)
+        text = (repo / ".claude" / "settings.json").read_text()
+        self.assertIn('"stillwright@stillwright": false', text)
+        self.assertLess(text.index("zeta"), text.index("alpha"))
+
+    def test_init_handles_empty_file_and_rejects_non_object_plugins(self):
+        repo = self.home / "repo"
+        (repo / ".claude").mkdir(parents=True)
+        (repo / ".claude" / "settings.json").write_text("")
+        self.sw("init", "--dir", str(repo), "--claude-only")
+        self.assertIn("stillwright@stillwright", (repo / ".claude" / "settings.json").read_text())
+        (repo / ".claude" / "settings.json").write_text('{"enabledPlugins": []}')
+        with self.assertRaises(Failed):
+            self.sw("init", "--dir", str(repo), "--claude-only")
+
+
+if __name__ == "__main__":
+    unittest.main()

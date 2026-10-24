@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="Stillwright">
+  <rect width="256" height="256" rx="56" fill="#12211a"/>
+  <!-- a still horizontal line: quiet -->
+  <rect x="56" y="124" width="144" height="8" rx="4" fill="#e5ede7"/>
+  <!-- one proven step: a check mark cut into the line's end -->
+  <path d="M152 100 L172 120 L212 80" fill="none" stroke="#3cc38b" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

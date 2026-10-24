@@ -25,11 +25,11 @@ that reads [Agent Skills](https://agentskills.io).
 
 ## Install
 
-One line for most agents (Claude Code, Cursor, Codex, Copilot CLI, VS Code, and 70+ others):
+One line for most agents:
 
 ```sh
-npx plugins add HamzaIlyas/stillwright     # plugin, where the agent supports plugins
-npx skills add HamzaIlyas/stillwright      # skills only, works almost everywhere
+npx plugins add HamzaIlyas/stillwright   # as a plugin: Claude Code, Cursor, Codex, Copilot CLI, VS Code
+npx skills add HamzaIlyas/stillwright    # as skills: 75+ agents, including all of the above
 ```
 
 Or the agent's own way:
@@ -45,7 +45,8 @@ Or the agent's own way:
 
 For a whole team: run `sw init` in the repository and commit the two files it writes
 (`.claude/settings.json`, `.github/copilot/settings.json`). Everyone who opens the repo gets
-Stillwright in Claude Code (after trusting the folder) and GitHub Copilot.
+Stillwright in Claude Code (after trusting the folder) and in Copilot CLI and the Copilot
+cloud agent.
 
 The skills need the `sw` binary (a single file, no runtime). Any of these installs it:
 
@@ -66,8 +67,9 @@ to a release version), when you are present to approve it.
 ## Use
 
 New here? The [quickstart](docs/quickstart.md) takes ten minutes, and CI runs every command in it.
-Also: [troubleshooting](docs/troubleshooting.md), [Windows notes](docs/windows.md), and a
-[real example run](examples/quickstart-run/README.md).
+Also: [troubleshooting](docs/troubleshooting.md), [Windows notes](docs/windows.md),
+[coming from OpenClaw or Hermes](docs/migrate.md), a [real example run](examples/quickstart-run/README.md),
+and a [press kit](press/README.md) for anyone writing or recording about it.
 
 Tell your agent a goal, or just say **"stillwright"**. The first time, it asks a few short
 questions to get to know you. After that:
