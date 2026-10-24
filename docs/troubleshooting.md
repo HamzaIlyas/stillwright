@@ -4,8 +4,8 @@ Each entry is a message you can actually see, what it means, and what to do.
 
 ## `sw: command not found` right after installing
 
-The installer puts `sw` in `~/.cargo/bin` (or `$CARGO_HOME/bin`) and prints how it updated
-your PATH, but the shell you're in doesn't know yet. Open a new terminal, or run the
+The installer puts `sw` in `~/.cargo/bin` (or `$CARGO_HOME/bin`); see its output for the PATH
+change it made. The shell you're in doesn't know yet. Open a new terminal, or run the
 `source` line the installer printed (usually `source ~/.cargo/env`).
 
 ## `profile: missing, run onboarding`
@@ -79,8 +79,8 @@ sw run list
 ```
 
 If the list doesn't grow, check the scheduler itself (cron logs, the routine's run history).
-Unattended runs also stop when `sw` is missing or a pinned tool changed, and leave a card
-or a log line saying why.
+Unattended runs also stop when `sw` is missing, and add a review card when a pinned tool
+changed.
 
 ## Still stuck
 

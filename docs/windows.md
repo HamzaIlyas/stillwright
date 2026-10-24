@@ -11,7 +11,7 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/HamzaIlyas/stillwr
 ```
 
 The installer places `sw.exe` under `CARGO_HOME\bin` (by default `%USERPROFILE%\.cargo\bin`)
-and prints whether it updated your user PATH. Open a new terminal, then:
+(see its output for PATH changes). Open a new terminal, then:
 
 ```sh
 sw --version
