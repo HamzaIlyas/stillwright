@@ -306,6 +306,15 @@ class InitTests(SwTestCase):
         with self.assertRaises(Failed):
             self.sw("init", "--dir", str(repo), "--claude-only")
 
+    def test_init_strips_byte_order_mark(self):
+        repo = self.home / "repo"
+        (repo / ".claude").mkdir(parents=True)
+        (repo / ".claude" / "settings.json").write_text('\ufeff{"a": 1}', encoding="utf-8")
+        self.sw("init", "--dir", str(repo), "--claude-only")
+        data = json.loads((repo / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        self.assertEqual(data["a"], 1)
+        self.assertIn("stillwright@stillwright", data["enabledPlugins"])
+
 
 if __name__ == "__main__":
     unittest.main()

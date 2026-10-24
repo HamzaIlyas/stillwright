@@ -22,7 +22,7 @@ five lines or fewer. State is plain files; the CLI is one Rust binary. MIT.
 
 - `logo.svg`, `logo.png` (dark), `logo-light.svg`, `logo-light.png`
 - `card.png`: 1280×640 social card
-- `demo-horizontal.mp4` (960×560, 18 s), `demo-vertical.mp4` (720×1280, 18 s), and
+- `demo-horizontal.mp4` (960×560, about 18 s), `demo-vertical.mp4` (720×1280, about 17 s), and
   `../assets/demo.gif`
 - Colours: ink `#12211a`, text `#e5ede7`, accent `#3cc38b`, muted `#93a39a`
 

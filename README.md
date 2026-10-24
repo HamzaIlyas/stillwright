@@ -28,7 +28,7 @@ that reads [Agent Skills](https://agentskills.io).
 One line for most agents:
 
 ```sh
-npx plugins add HamzaIlyas/stillwright   # as a plugin: Claude Code, Cursor, Codex, Copilot CLI, VS Code
+npx plugins add HamzaIlyas/stillwright   # as a plugin: Claude Code, Cursor, Codex, Copilot CLI, VS Code, Grok Build, Kimi Code
 npx skills add HamzaIlyas/stillwright    # as skills: 75+ agents, including all of the above
 ```
 
