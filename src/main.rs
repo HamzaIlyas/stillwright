@@ -282,9 +282,12 @@ impl Store {
 
     /// Serialise read-modify-write so a scheduled run and a live session can't lose updates.
     fn lock(&self) -> Result<File> {
+        // read+write, not append-only: Windows' LockFileEx denies locks on append-only handles.
         let file = OpenOptions::new()
             .create(true)
-            .append(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
             .open(self.root.join(".lock"))
             .map_err(|e| format!("cannot open lock file: {e}"))?;
         file.lock().map_err(|e| format!("cannot lock state: {e}"))?;
