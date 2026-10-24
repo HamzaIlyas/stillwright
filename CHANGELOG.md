@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 - 2026-10-24
 - docs/evals.md: re-run after the skill change; all three runs within five lines.
 - sw-scout: references/vetted-tools.md, a checked starter list with an avoid list.
 - stillwright skill: the final message is the notify card text; five-line rule applies to it (gap found by the eval).
