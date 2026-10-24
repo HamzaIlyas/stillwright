@@ -1,28 +1,45 @@
-import contextlib
-import io
+"""Black-box tests for the sw binary. Set SW_BIN to test a specific build
+(default: target/release/sw, then target/debug/sw)."""
 import json
 import os
 import pathlib
-import sys
+import subprocess
 import tempfile
 import unittest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "skills" / "stillwright" / "scripts"))
-import sw  # noqa: E402
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def find_binary() -> str:
+    if os.environ.get("SW_BIN"):
+        return os.environ["SW_BIN"]
+    for build in ("release", "debug"):
+        for name in ("sw", "sw.exe"):
+            candidate = ROOT / "target" / build / name
+            if candidate.exists():
+                return str(candidate)
+    raise SystemExit("sw binary not found: run `cargo build --release` or set SW_BIN")
+
+
+SW = find_binary()
+
+
+class Failed(Exception):
+    pass
 
 
 class SwTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        os.environ["STILLWRIGHT_HOME"] = self.tmp.name
         self.home = pathlib.Path(self.tmp.name)
+        self.env = {**os.environ, "STILLWRIGHT_HOME": self.tmp.name}
 
     def sw(self, *argv):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            sw.main(list(argv))
-        return out.getvalue()
+        result = subprocess.run([SW, *argv], env=self.env, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise Failed(result.stderr.strip())
+        return result.stdout
 
 
 class GoalTests(SwTestCase):
@@ -36,7 +53,7 @@ class GoalTests(SwTestCase):
         self.assertIn("(done)", self.sw("goal", "list", "--all"))
 
     def test_unknown_id_exits(self):
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(Failed):
             self.sw("goal", "done", "99")
 
 
@@ -65,7 +82,7 @@ class RunTests(SwTestCase):
 
     def test_log_requires_key_value(self):
         self.sw("run", "new", "x")
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(Failed):
             self.sw("run", "log", "latest", "oops")
 
     def test_status_without_plan(self):
@@ -95,7 +112,7 @@ class InboxTests(SwTestCase):
         self.assertIn("answer: yes", self.sw("inbox", "show", "1"))
 
     def test_rejects_unknown_kind(self):
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(Failed):
             self.sw("inbox", "add", "spam", "nope")
 
 
@@ -107,11 +124,15 @@ class NoteTests(SwTestCase):
         self.assertIn("retired: user changed mind", self.sw("note", "list", "--all"))
 
     def test_source_is_required(self):
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(Failed):
             self.sw("note", "add", "unsourced claim")
 
 
 class ToolTests(SwTestCase):
+    def hash_of(self, path):
+        self.sw("tool", "pin", "h", str(path), "--force")
+        return json.loads((self.home / "tools.lock.json").read_text())[0]["sha256"]
+
     def test_pin_then_detect_change_and_missing(self):
         tool = self.home / "some-skill"
         tool.mkdir()
@@ -119,11 +140,11 @@ class ToolTests(SwTestCase):
         self.sw("tool", "pin", "some-skill", str(tool), "--source", "https://example.com/x")
         self.assertIn("some-skill: ok", self.sw("tool", "check"))
         (tool / "SKILL.md").write_text("v2")
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(Failed):
             self.sw("tool", "check")
         (tool / "SKILL.md").unlink()
         tool.rmdir()
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(Failed):
             self.sw("tool", "check")
 
     def test_repin_of_changed_tool_needs_force(self):
@@ -131,7 +152,7 @@ class ToolTests(SwTestCase):
         tool.write_text("v1")
         self.sw("tool", "pin", "t", str(tool))
         tool.write_text("v2")
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(Failed):
             self.sw("tool", "pin", "t", str(tool))
         self.sw("tool", "pin", "t", str(tool), "--force")
         self.assertIn("t: ok", self.sw("tool", "check"))
@@ -140,25 +161,25 @@ class ToolTests(SwTestCase):
         tool = self.home / "c"
         tool.mkdir()
         (tool / "a.py").write_text("a")
-        before = sw.content_hash(tool)
+        before = self.hash_of(tool)
         (tool / "__pycache__").mkdir()
         (tool / "__pycache__" / "a.pyc").write_bytes(b"x")
         (tool / ".DS_Store").write_bytes(b"x")
-        self.assertEqual(before, sw.content_hash(tool))
+        self.assertEqual(before, self.hash_of(tool))
 
     def test_hash_ignores_git_dir(self):
         tool = self.home / "t"
         (tool / ".git").mkdir(parents=True)
         (tool / "a.txt").write_text("a")
-        before = sw.content_hash(tool)
+        before = self.hash_of(tool)
         (tool / ".git" / "HEAD").write_text("ref")
-        self.assertEqual(before, sw.content_hash(tool))
+        self.assertEqual(before, self.hash_of(tool))
 
 
 class CorruptStateTests(SwTestCase):
     def test_corrupt_json_gives_clear_error(self):
         (self.home / "goals.json").write_text("{broken")
-        with self.assertRaises(SystemExit) as ctx:
+        with self.assertRaises(Failed) as ctx:
             self.sw("status")
         self.assertIn("not valid JSON", str(ctx.exception))
 

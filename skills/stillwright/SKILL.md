@@ -1,6 +1,7 @@
 ---
 name: stillwright
 description: Quiet autonomous orchestrator. Learns its user once, keeps a goal queue, plans each goal, routes steps to the best agents, models and tools, and passes a step only when an independent check proves it. Works on its own and speaks only when needed, in five lines or fewer. Use whenever the user gives a goal bigger than one step (build, fix, research, write, launch, set up), says "take care of it", "keep going", "what's next", "continue", "status", "stillwright" or "sw", or comes back after being away. Also use at the start of any session where ~/.stillwright/profile.md exists.
+compatibility: Needs the sw binary (installed by scripts/get-sw.sh; Linux, macOS, Windows).
 license: MIT
 metadata:
   author: Hamza Ilyas
@@ -31,10 +32,10 @@ when a decision is truly theirs, and every result they see has been proven, not 
 
 ## The tool
 
-`sw` keeps all state. Run it as plain `sw` if installed with pip, otherwise
-`python3 <absolute path of this skill's folder>/scripts/sw.py ...` (resolve the path from
-where this SKILL.md lives, not from the working directory). `sw status` gives a one-screen summary. Full command list:
-`sw --help`.
+`sw` keeps all state. It is a single binary (Rust, no runtime needed). If `sw` is not on
+PATH, run `scripts/get-sw.sh` in this skill's folder once: it downloads the release for this
+machine from GitHub and checks its hash. `sw status` gives a one-screen summary; `sw --help`
+lists every command.
 
 ## Loop
 

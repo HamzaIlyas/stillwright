@@ -9,7 +9,7 @@ metadata:
 
 # Verify
 
-`sw` below means the `sw` command if installed with pip; otherwise `python3 <SW>`, where `<SW>` is the absolute path of `stillwright/scripts/sw.py` in the same skills folder as this skill (resolve it once from this skill's own location, not the working directory).
+`sw` below is the Stillwright binary. If `sw` is not on PATH, run `scripts/get-sw.sh` from the `stillwright` skill's folder once (it downloads the release for this machine and checks its hash).
 
 Agents regularly report work as done when it isn't: tests skipped, UI visibly broken, a
 claim nobody checked. The worker's own report is evidence to check, never the verdict.

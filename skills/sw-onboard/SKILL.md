@@ -9,7 +9,7 @@ metadata:
 
 # Onboard
 
-`sw` below means the `sw` command if installed with pip; otherwise `python3 <SW>`, where `<SW>` is the absolute path of `stillwright/scripts/sw.py` in the same skills folder as this skill (resolve it once from this skill's own location, not the working directory).
+`sw` below is the Stillwright binary. If `sw` is not on PATH, run `scripts/get-sw.sh` from the `stillwright` skill's folder once (it downloads the release for this machine and checks its hash).
 
 Goal: enough understanding to work for days without asking basic questions, gathered in
 **at most three short rounds**. People quit long questionnaires, so look first and ask second.

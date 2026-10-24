@@ -63,9 +63,9 @@ def check_manifests() -> list:
     market = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text())
     if not any(p.get("name") == "stillwright" for p in market.get("plugins", [])):
         problems.append("marketplace.json: stillwright plugin missing")
-    pyproject = (ROOT / "pyproject.toml").read_text()
-    if f'version = "{version}"' not in pyproject:
-        problems.append("pyproject.toml: version does not match VERSION")
+    cargo = (ROOT / "Cargo.toml").read_text()
+    if f'\nversion = "{version}"' not in cargo:
+        problems.append("Cargo.toml: version does not match VERSION")
     return problems
 
 

@@ -1,0 +1,938 @@
+//! sw: the state keeper for Stillwright. Plain files in $STILLWRIGHT_HOME (default ~/.stillwright):
+//!
+//!   profile.md       what the user told us (written during onboarding)
+//!   notes.json       what we learned ourselves: dated, sourced, retired when contradicted
+//!   goals.json       the work queue
+//!   inbox.json       the only way we talk to the user: ask | review | notify | idea
+//!   tools.lock.json  third-party tools we trust, pinned by content hash
+//!   runs/<id>/       plan.md + log.jsonl per piece of work
+
+use std::collections::BTreeMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use clap::{Parser, Subcommand, ValueEnum};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+const HASH_SKIP: &[&str] = &[
+    ".git",
+    "__pycache__",
+    "node_modules",
+    ".DS_Store",
+    ".venv",
+    "target",
+];
+
+type Result<T> = std::result::Result<T, String>;
+
+// ---------------------------------------------------------------- data
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Goal {
+    id: u64,
+    text: String,
+    priority: u8,
+    status: String,
+    created: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    closed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Card {
+    id: u64,
+    kind: Kind,
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    run: String,
+    status: String,
+    created: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    answer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    answered: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    closed: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Note {
+    id: u64,
+    text: String,
+    kind: NoteKind,
+    source: String,
+    valid_from: String,
+    valid_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retired_reason: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Tool {
+    name: String,
+    path: String,
+    #[serde(default)]
+    source: String,
+    sha256: String,
+    pinned: String,
+}
+
+/// Inbox kinds, in the order the user should see them.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+#[serde(rename_all = "lowercase")]
+enum Kind {
+    Ask,
+    Review,
+    Notify,
+    Idea,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, ValueEnum, Debug)]
+#[serde(rename_all = "lowercase")]
+enum NoteKind {
+    Fact,
+    Preference,
+    Constraint,
+}
+
+impl Kind {
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Ask => "ask",
+            Kind::Review => "review",
+            Kind::Notify => "notify",
+            Kind::Idea => "idea",
+        }
+    }
+}
+
+impl NoteKind {
+    fn name(self) -> &'static str {
+        match self {
+            NoteKind::Fact => "fact",
+            NoteKind::Preference => "preference",
+            NoteKind::Constraint => "constraint",
+        }
+    }
+}
+
+// ---------------------------------------------------------------- cli
+
+#[derive(Parser)]
+#[command(
+    name = "sw",
+    version,
+    about = "Stillwright state keeper",
+    disable_help_subcommand = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// One-screen summary: profile, goals, inbox, last run
+    Status,
+    /// Print the state folder
+    Home,
+    /// The work queue
+    #[command(subcommand)]
+    Goal(GoalCmd),
+    /// Plans and logs for pieces of work
+    #[command(subcommand)]
+    Run(RunCmd),
+    /// The only channel to the user: ask | review | notify | idea
+    #[command(subcommand)]
+    Inbox(InboxCmd),
+    /// Things learned about the user, with source and validity
+    #[command(subcommand)]
+    Note(NoteCmd),
+    /// Third-party tools pinned by content hash
+    #[command(subcommand)]
+    Tool(ToolCmd),
+}
+
+#[derive(Subcommand)]
+enum GoalCmd {
+    Add {
+        text: String,
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=5))]
+        priority: u8,
+    },
+    List {
+        #[arg(long)]
+        all: bool,
+    },
+    Done {
+        id: u64,
+        #[arg(long)]
+        note: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunCmd {
+    New {
+        slug: String,
+        #[arg(long)]
+        goal: Option<u64>,
+    },
+    /// Append key=value pairs to a run's log (run: an id, a path, or "latest")
+    Log {
+        run: String,
+        #[arg(required = true)]
+        pairs: Vec<String>,
+    },
+    Status {
+        #[arg(default_value = "latest")]
+        run: String,
+    },
+    List,
+}
+
+#[derive(Subcommand)]
+enum InboxCmd {
+    Add {
+        kind: Kind,
+        title: String,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long)]
+        run: Option<String>,
+    },
+    List {
+        #[arg(long)]
+        all: bool,
+    },
+    Show {
+        id: u64,
+    },
+    /// Record the user's reply; the card stays visible until it is applied and closed
+    Answer {
+        id: u64,
+        answer: String,
+    },
+    Close {
+        id: u64,
+        #[arg(long)]
+        answer: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum NoteCmd {
+    Add {
+        text: String,
+        #[arg(long)]
+        source: String,
+        #[arg(long, value_enum, default_value_t = NoteKind::Fact)]
+        kind: NoteKind,
+    },
+    List {
+        #[arg(long)]
+        all: bool,
+    },
+    Retire {
+        id: u64,
+        #[arg(long)]
+        reason: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ToolCmd {
+    Pin {
+        name: String,
+        path: PathBuf,
+        #[arg(long)]
+        source: Option<String>,
+        /// Re-pin a tool whose content changed (only after re-vetting it)
+        #[arg(long)]
+        force: bool,
+    },
+    Check,
+    List,
+}
+
+// ---------------------------------------------------------------- storage
+
+struct Store {
+    root: PathBuf,
+}
+
+impl Store {
+    fn open() -> Result<Self> {
+        let root = match std::env::var_os("STILLWRIGHT_HOME").filter(|v| !v.is_empty()) {
+            Some(v) => PathBuf::from(v),
+            None => home_dir()?.join(".stillwright"),
+        };
+        fs::create_dir_all(root.join("runs"))
+            .map_err(|e| format!("cannot create {}: {e}", root.display()))?;
+        Ok(Store { root })
+    }
+
+    /// Serialise read-modify-write so a scheduled run and a live session can't lose updates.
+    fn lock(&self) -> Result<File> {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.root.join(".lock"))
+            .map_err(|e| format!("cannot open lock file: {e}"))?;
+        file.lock().map_err(|e| format!("cannot lock state: {e}"))?;
+        Ok(file)
+    }
+
+    fn load<T: DeserializeOwned>(&self, name: &str) -> Result<Vec<T>> {
+        let path = self.root.join(name);
+        let text = match fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        };
+        if text.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        serde_json::from_str(&text).map_err(|e| {
+            format!(
+                "{} is not valid JSON ({e}); fix or move it aside, then retry",
+                path.display()
+            )
+        })
+    }
+
+    fn save<T: Serialize>(&self, name: &str, items: &[T]) -> Result<()> {
+        let path = self.root.join(name);
+        let tmp = self.root.join(format!(".tmp-{name}"));
+        let json = serde_json::to_string_pretty(items).map_err(|e| e.to_string())?;
+        fs::write(&tmp, json).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+        fs::rename(&tmp, &path).map_err(|e| format!("cannot replace {}: {e}", path.display()))
+    }
+
+    fn runs(&self) -> Result<Vec<PathBuf>> {
+        let mut runs: Vec<PathBuf> = fs::read_dir(self.root.join("runs"))
+            .map_err(|e| e.to_string())?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_dir())
+            .collect();
+        runs.sort();
+        Ok(runs)
+    }
+
+    fn resolve_run(&self, reference: &str) -> Result<PathBuf> {
+        let runs = self.runs()?;
+        if reference.is_empty() || reference == "latest" {
+            return runs
+                .last()
+                .cloned()
+                .ok_or_else(|| "no runs yet".to_string());
+        }
+        let path = PathBuf::from(reference);
+        if path.is_dir() {
+            return Ok(path);
+        }
+        runs.into_iter()
+            .rfind(|p| {
+                let name = file_name(p);
+                name == reference || name.ends_with(reference)
+            })
+            .ok_or_else(|| format!("no run matching {reference}"))
+    }
+}
+
+fn home_dir() -> Result<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok_or_else(|| "cannot find home folder; set STILLWRIGHT_HOME".to_string())
+}
+
+fn now() -> String {
+    chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+fn file_name(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn next_id(ids: impl Iterator<Item = u64>) -> u64 {
+    ids.max().unwrap_or(0) + 1
+}
+
+fn find<T>(items: &mut [T], id: u64, get: fn(&T) -> u64) -> Result<&mut T> {
+    items
+        .iter_mut()
+        .find(|i| get(i) == id)
+        .ok_or_else(|| format!("no item with id {id}"))
+}
+
+// ---------------------------------------------------------------- runs
+
+/// A plan step is a line like "3. do x | who: ... | check: ...". Only lines with a check count.
+fn plan_steps(plan: &str) -> Vec<String> {
+    plan.lines()
+        .filter_map(|line| {
+            let digits: String = line.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let rest = &line[digits.len()..];
+            if digits.is_empty() || !rest.starts_with('.') {
+                return None;
+            }
+            let has_check = rest
+                .split('|')
+                .skip(1)
+                .any(|part| part.trim_start().starts_with("check:"));
+            has_check.then_some(digits)
+        })
+        .collect()
+}
+
+fn step_results(run: &Path) -> BTreeMap<String, String> {
+    let mut results = BTreeMap::new();
+    let text = fs::read_to_string(run.join("log.jsonl")).unwrap_or_default();
+    for (n, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(line) {
+            Ok(event) => {
+                if let (Some(step), Some(result)) = (event.get("step"), event.get("result")) {
+                    results.insert(value_str(step), value_str(result));
+                }
+            }
+            Err(_) => eprintln!(
+                "warning: {}/log.jsonl line {} is not JSON, skipped",
+                file_name(run),
+                n + 1
+            ),
+        }
+    }
+    results
+}
+
+fn value_str(v: &serde_json::Value) -> String {
+    v.as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| v.to_string())
+}
+
+struct Progress {
+    next: Option<String>,
+    total: usize,
+    results: BTreeMap<String, String>,
+}
+
+impl Progress {
+    fn of(run: &Path) -> Self {
+        let steps = fs::read_to_string(run.join("plan.md"))
+            .map(|p| plan_steps(&p))
+            .unwrap_or_default();
+        let results = step_results(run);
+        let next = steps
+            .iter()
+            .find(|s| results.get(*s).map(String::as_str) != Some("pass"))
+            .cloned();
+        Progress {
+            next,
+            total: steps.len(),
+            results,
+        }
+    }
+
+    fn passed(&self) -> usize {
+        self.results.values().filter(|r| *r == "pass").count()
+    }
+}
+
+fn append_event(run: &Path, pairs: &[(String, String)]) -> Result<()> {
+    let mut event = serde_json::Map::new();
+    event.insert("ts".into(), now().into());
+    for (k, v) in pairs {
+        event.insert(k.clone(), v.clone().into());
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(run.join("log.jsonl"))
+        .map_err(|e| format!("cannot open run log: {e}"))?;
+    writeln!(file, "{}", serde_json::Value::Object(event)).map_err(|e| e.to_string())
+}
+
+fn slugify(text: &str) -> String {
+    let mut slug = String::new();
+    for c in text.to_lowercase().chars() {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' {
+            slug.push(c);
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug: String = slug.trim_matches('-').chars().take(40).collect();
+    let slug = slug.trim_end_matches('-').to_string();
+    if slug.is_empty() {
+        "run".into()
+    } else {
+        slug
+    }
+}
+
+// ---------------------------------------------------------------- tools
+
+fn content_hash(path: &Path) -> Result<String> {
+    let mut files = Vec::new();
+    if path.is_file() {
+        files.push((file_name(path), path.to_path_buf()));
+    } else {
+        collect_files(path, path, &mut files)?;
+        files.sort();
+    }
+    let mut digest = Sha256::new();
+    for (rel, file) in files {
+        let bytes = fs::read(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+        digest.update(rel.as_bytes());
+        digest.update([0u8]);
+        digest.update(&bytes);
+        digest.update([0u8]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
+    for entry in fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if HASH_SKIP.contains(&file_name(&path).as_str()) {
+            continue;
+        }
+        if path.is_dir() {
+            collect_files(root, &path, out)?;
+        } else if path.is_file() {
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            let rel = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            out.push((rel, path));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- commands
+
+fn run(cli: Cli) -> Result<()> {
+    let store = Store::open()?;
+    let _lock = store.lock()?;
+    match cli.cmd {
+        Cmd::Status => status(&store),
+        Cmd::Home => {
+            println!("{}", store.root.display());
+            Ok(())
+        }
+        Cmd::Goal(cmd) => goal(&store, cmd),
+        Cmd::Run(cmd) => run_cmd(&store, cmd),
+        Cmd::Inbox(cmd) => inbox(&store, cmd),
+        Cmd::Note(cmd) => note(&store, cmd),
+        Cmd::Tool(cmd) => tool(&store, cmd),
+    }
+}
+
+fn status(store: &Store) -> Result<()> {
+    let goals: Vec<Goal> = store.load("goals.json")?;
+    let cards: Vec<Card> = store.load("inbox.json")?;
+    let open = goals.iter().filter(|g| g.status == "open").count();
+    let counts: Vec<String> = [Kind::Ask, Kind::Review, Kind::Notify, Kind::Idea]
+        .iter()
+        .map(|k| {
+            format!(
+                "{} {}",
+                k.name(),
+                cards
+                    .iter()
+                    .filter(|c| c.status == "open" && c.kind == *k)
+                    .count()
+            )
+        })
+        .collect();
+    let answered = cards.iter().filter(|c| c.status == "answered").count();
+    let profile = store.root.join("profile.md").exists();
+    println!(
+        "profile: {}",
+        if profile {
+            "yes"
+        } else {
+            "missing, run onboarding"
+        }
+    );
+    let mut line = format!("goals: {open} open | inbox: {}", counts.join(", "));
+    if answered > 0 {
+        line.push_str(&format!(" | answered {answered} (apply, then close)"));
+    }
+    println!("{line}");
+    if let Some(last) = store.runs()?.last() {
+        let progress = Progress::of(last);
+        let next = progress
+            .next
+            .map(|s| format!("step {s}"))
+            .unwrap_or_else(|| "done".into());
+        println!("last run: {} next: {next}", file_name(last));
+    }
+    Ok(())
+}
+
+fn goal(store: &Store, cmd: GoalCmd) -> Result<()> {
+    let mut goals: Vec<Goal> = store.load("goals.json")?;
+    match cmd {
+        GoalCmd::Add { text, priority } => {
+            let id = next_id(goals.iter().map(|g| g.id));
+            goals.push(Goal {
+                id,
+                text,
+                priority,
+                status: "open".into(),
+                created: now(),
+                closed: None,
+                note: None,
+            });
+            store.save("goals.json", &goals)?;
+            println!("goal {id} added");
+        }
+        GoalCmd::List { all } => {
+            let mut shown: Vec<&Goal> =
+                goals.iter().filter(|g| all || g.status == "open").collect();
+            shown.sort_by_key(|g| (g.priority, g.id));
+            for g in &shown {
+                let tail = if g.status == "open" {
+                    String::new()
+                } else {
+                    format!(" ({})", g.status)
+                };
+                println!("{}. [p{}] {}{tail}", g.id, g.priority, g.text);
+            }
+            if shown.is_empty() {
+                println!("no open goals");
+            }
+        }
+        GoalCmd::Done { id, note } => {
+            let g = find(&mut goals, id, |g| g.id)?;
+            g.status = "done".into();
+            g.closed = Some(now());
+            g.note = Some(note.unwrap_or_default());
+            store.save("goals.json", &goals)?;
+            println!("goal {id} done");
+        }
+    }
+    Ok(())
+}
+
+fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
+    match cmd {
+        RunCmd::New { slug, goal } => {
+            let base = format!(
+                "{}-{}",
+                chrono::Local::now().format("%Y%m%d-%H%M%S"),
+                slugify(&slug)
+            );
+            let runs = store.root.join("runs");
+            let mut dir = runs.join(&base);
+            let mut n = 1;
+            while dir.exists() {
+                n += 1;
+                dir = runs.join(format!("{base}-{n}"));
+            }
+            fs::create_dir_all(&dir)
+                .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+            File::create(dir.join("log.jsonl")).map_err(|e| e.to_string())?;
+            if let Some(goal) = goal {
+                append_event(
+                    &dir,
+                    &[
+                        ("event".into(), "start".into()),
+                        ("goal".into(), goal.to_string()),
+                    ],
+                )?;
+            }
+            println!("{}", dir.display());
+        }
+        RunCmd::Log { run, pairs } => {
+            let mut parsed = Vec::new();
+            for pair in pairs {
+                match pair.split_once('=') {
+                    Some((k, v)) => parsed.push((k.to_string(), v.to_string())),
+                    None => return Err(format!("expected key=value, got '{pair}'")),
+                }
+            }
+            append_event(&store.resolve_run(&run)?, &parsed)?;
+        }
+        RunCmd::Status { run } => {
+            let dir = store.resolve_run(&run)?;
+            let p = Progress::of(&dir);
+            println!(
+                "{}: {}/{} steps passed",
+                file_name(&dir),
+                p.passed(),
+                p.total
+            );
+            let mut failing: Vec<(&String, &String)> =
+                p.results.iter().filter(|(_, r)| *r != "pass").collect();
+            failing.sort_by_key(|(s, _)| s.parse::<u64>().unwrap_or(0));
+            for (step, result) in failing {
+                println!("  step {step}: {result}");
+            }
+            let next = match (&p.next, p.total) {
+                (Some(s), _) => format!("step {s}"),
+                (None, 0) => "write plan.md".into(),
+                (None, _) => "none, all passed".into(),
+            };
+            println!("next: {next}");
+        }
+        RunCmd::List => {
+            let runs = store.runs()?;
+            for dir in runs.iter().rev().take(10).rev() {
+                let p = Progress::of(dir);
+                println!("{}  {}/{}", file_name(dir), p.passed(), p.total);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn inbox(store: &Store, cmd: InboxCmd) -> Result<()> {
+    let mut cards: Vec<Card> = store.load("inbox.json")?;
+    match cmd {
+        InboxCmd::Add {
+            kind,
+            title,
+            body,
+            run,
+        } => {
+            let id = next_id(cards.iter().map(|c| c.id));
+            cards.push(Card {
+                id,
+                kind,
+                title,
+                body: body.unwrap_or_default(),
+                run: run.unwrap_or_default(),
+                status: "open".into(),
+                created: now(),
+                answer: None,
+                answered: None,
+                closed: None,
+            });
+            store.save("inbox.json", &cards)?;
+            println!("inbox {id} ({}) added", kind.name());
+        }
+        InboxCmd::List { all } => {
+            let mut shown: Vec<&Card> = cards
+                .iter()
+                .filter(|c| all || c.status == "open" || c.status == "answered")
+                .collect();
+            shown.sort_by_key(|c| (c.kind, c.id));
+            for c in &shown {
+                let tail = if c.status == "open" {
+                    String::new()
+                } else {
+                    format!(" ({})", c.status)
+                };
+                println!("{}. {}: {}{tail}", c.id, c.kind.name(), c.title);
+            }
+            if shown.is_empty() {
+                println!("inbox empty");
+            }
+        }
+        InboxCmd::Show { id } => {
+            let c = find(&mut cards, id, |c| c.id)?;
+            println!("{}. {}: {} ({})", c.id, c.kind.name(), c.title, c.status);
+            for (key, value) in [
+                ("body", &c.body),
+                ("answer", c.answer.as_ref().unwrap_or(&String::new())),
+                ("run", &c.run),
+            ] {
+                if !value.is_empty() {
+                    println!("{key}: {value}");
+                }
+            }
+        }
+        InboxCmd::Answer { id, answer } => {
+            let c = find(&mut cards, id, |c| c.id)?;
+            c.status = "answered".into();
+            c.answer = Some(answer);
+            c.answered = Some(now());
+            store.save("inbox.json", &cards)?;
+            println!("inbox {id} answered");
+        }
+        InboxCmd::Close { id, answer } => {
+            let c = find(&mut cards, id, |c| c.id)?;
+            c.status = "closed".into();
+            c.closed = Some(now());
+            if answer.is_some() {
+                c.answer = answer;
+            }
+            store.save("inbox.json", &cards)?;
+            println!("inbox {id} closed");
+        }
+    }
+    Ok(())
+}
+
+fn note(store: &Store, cmd: NoteCmd) -> Result<()> {
+    let mut notes: Vec<Note> = store.load("notes.json")?;
+    match cmd {
+        NoteCmd::Add { text, source, kind } => {
+            let id = next_id(notes.iter().map(|n| n.id));
+            notes.push(Note {
+                id,
+                text,
+                kind,
+                source,
+                valid_from: now(),
+                valid_to: None,
+                retired_reason: None,
+            });
+            store.save("notes.json", &notes)?;
+            println!("note {id} added");
+        }
+        NoteCmd::List { all } => {
+            let shown: Vec<&Note> = notes
+                .iter()
+                .filter(|n| all || n.valid_to.is_none())
+                .collect();
+            for n in &shown {
+                let tail = match &n.valid_to {
+                    None => String::new(),
+                    Some(_) => format!(
+                        " (retired: {})",
+                        n.retired_reason.clone().unwrap_or_default()
+                    ),
+                };
+                let day: String = n.valid_from.chars().take(10).collect();
+                println!(
+                    "{}. [{}] {} (source: {}, {day}){tail}",
+                    n.id,
+                    n.kind.name(),
+                    n.text,
+                    n.source
+                );
+            }
+            if shown.is_empty() {
+                println!("no notes");
+            }
+        }
+        NoteCmd::Retire { id, reason } => {
+            let n = find(&mut notes, id, |n| n.id)?;
+            n.valid_to = Some(now());
+            n.retired_reason = Some(reason);
+            store.save("notes.json", &notes)?;
+            println!("note {id} retired");
+        }
+    }
+    Ok(())
+}
+
+fn tool(store: &Store, cmd: ToolCmd) -> Result<()> {
+    let mut tools: Vec<Tool> = store.load("tools.lock.json")?;
+    match cmd {
+        ToolCmd::Pin {
+            name,
+            path,
+            source,
+            force,
+        } => {
+            let path = fs::canonicalize(&path)
+                .map_err(|_| format!("{} does not exist", path.display()))?;
+            let digest = content_hash(&path)?;
+            if let Some(old) = tools.iter().find(|t| t.name == name) {
+                if old.sha256 != digest && !force {
+                    return Err(format!("{name} changed since it was pinned; re-vet it, then pin again with --force"));
+                }
+            }
+            tools.retain(|t| t.name != name);
+            tools.push(Tool {
+                name: name.clone(),
+                path: path.display().to_string(),
+                source: source.unwrap_or_default(),
+                sha256: digest,
+                pinned: now(),
+            });
+            store.save("tools.lock.json", &tools)?;
+            println!("pinned {name}");
+        }
+        ToolCmd::Check => {
+            let mut drift = 0;
+            for t in &tools {
+                let path = Path::new(&t.path);
+                let state = if !path.exists() {
+                    "MISSING"
+                } else if content_hash(path)? != t.sha256 {
+                    "CHANGED"
+                } else {
+                    "ok"
+                };
+                if state != "ok" {
+                    drift += 1;
+                }
+                println!("{}: {state}", t.name);
+            }
+            if drift > 0 {
+                return Err(format!(
+                    "{drift} tool(s) changed since pinned: re-vet before use"
+                ));
+            }
+        }
+        ToolCmd::List => {
+            for t in &tools {
+                let shown = if t.source.is_empty() {
+                    &t.path
+                } else {
+                    &t.source
+                };
+                println!(
+                    "{}  {}  {shown}",
+                    t.name,
+                    &t.sha256[..12.min(t.sha256.len())]
+                );
+            }
+            if tools.is_empty() {
+                println!("no pinned tools");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn main() -> ExitCode {
+    match run(Cli::parse()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("{message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn steps_need_a_check() {
+        let plan = "# Goal\n1. a | who: me | check: true\n2. b |check: x\n3. not a step\n10. c | check: y\nOutward: none";
+        assert_eq!(plan_steps(plan), vec!["1", "2", "10"]);
+    }
+
+    #[test]
+    fn slugs_are_safe_and_short() {
+        assert_eq!(slugify("Build Thing!"), "build-thing");
+        assert_eq!(slugify("***"), "run");
+        assert_eq!(slugify(&"a".repeat(60)).len(), 40);
+    }
+}

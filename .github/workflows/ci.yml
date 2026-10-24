@@ -4,16 +4,29 @@ on:
     branches: [main]
   pull_request:
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  rust:
     strategy:
       matrix:
-        python: ["3.9", "3.13"]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --release -- -D warnings
+      - run: cargo build --release --locked
+      - run: cargo test --release --locked
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tests -v
+  skills:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
-      - run: python -m unittest discover -s tests -v
+          python-version: "3.12"
       - run: python scripts/validate_skills.py
-      - run: pip install . && sw --help > /dev/null

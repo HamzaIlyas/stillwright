@@ -9,7 +9,7 @@ metadata:
 
 # Radar
 
-`sw` below means the `sw` command if installed with pip; otherwise `python3 <SW>`, where `<SW>` is the absolute path of `stillwright/scripts/sw.py` in the same skills folder as this skill (resolve it once from this skill's own location, not the working directory).
+`sw` below is the Stillwright binary. If `sw` is not on PATH, run `scripts/get-sw.sh` from the `stillwright` skill's folder once (it downloads the release for this machine and checks its hash).
 
 Being proactive is only useful if it's rare and right. Proactive agents usually fail by
 speaking when they have nothing worth saying. Default output: **nothing**.

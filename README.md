@@ -25,8 +25,14 @@ Works with Claude Code, Codex, Gemini CLI, OpenCode and any agent that reads
 | Gemini CLI | `gemini extensions install https://github.com/HamzaIlyas/stillwright` |
 | Any Agent Skills agent | `npx skills add HamzaIlyas/stillwright` |
 
-Optional: `pipx install git+https://github.com/HamzaIlyas/stillwright` gives you the `sw`
-command directly. Without it the skills run the bundled script with Python 3.9+.
+The skills need the `sw` binary (a single file, no runtime). Any of these installs it:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/HamzaIlyas/stillwright/releases/latest/download/stillwright-installer.sh | sh
+cargo install stillwright
+```
+
+The skills also install it themselves on first use (`scripts/get-sw.sh`).
 
 ## Use
 
@@ -59,6 +65,10 @@ never push, deploy, publish or install anything new; those wait in your inbox.
 
 All state is plain files in `~/.stillwright` (profile, goals, inbox, notes, pinned tools,
 run logs). Nothing leaves your machine except what your agent already sends.
+
+`sw` is written in Rust: one small binary per platform, instant start, and a compiler that
+rejects whole classes of bugs before anything runs, which matters for a tool that will later
+run as a background service and extend itself.
 
 ## Status
 
