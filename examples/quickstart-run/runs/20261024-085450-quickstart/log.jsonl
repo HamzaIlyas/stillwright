@@ -1,0 +1,6 @@
+{"event":"start","goal":"1","ts":"2026-10-24T08:54:50"}
+{"event":"plan_approved","note":"approved by user in chat: docs items","ts":"2026-10-24T08:54:50"}
+{"check":"python3 scripts/check_docs.py docs/quickstart.md","note":"checker split args without quote handling; 'sw run status latest' has no run in a fresh home","result":"fail","step":"1","ts":"2026-10-24T08:55:16","who":"self"}
+{"check":"python3 scripts/check_docs.py docs/quickstart.md","note":"12 commands ran; 1 allowed to fail by design (no runs yet)","result":"pass","step":"1","ts":"2026-10-24T08:55:16","who":"self"}
+{"check":"grep -q check_docs .github/workflows/ci.yml","result":"pass","step":"2","ts":"2026-10-24T08:55:16","who":"self"}
+{"check":"grep -q docs/quickstart.md README.md","result":"pass","step":"3","ts":"2026-10-24T08:55:16","who":"self"}

@@ -1,0 +1,11 @@
+[
+  {
+    "id": 1,
+    "text": "Write docs/quickstart.md whose every sw command is proven to run",
+    "priority": 1,
+    "status": "done",
+    "created": "2026-10-24T08:54:50",
+    "closed": "2026-10-24T08:55:16",
+    "note": "quickstart written, every command verified"
+  }
+]

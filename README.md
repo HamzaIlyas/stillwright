@@ -47,6 +47,8 @@ to a release version), when you are present to approve it.
 
 ## Use
 
+New here? The [quickstart](docs/quickstart.md) takes ten minutes, and CI runs every command in it.
+
 Tell your agent a goal, or just say **"stillwright"**. The first time, it asks a few short
 questions to get to know you. After that:
 
