@@ -155,6 +155,21 @@ enum Cmd {
     /// Third-party tools pinned by content hash
     #[command(subcommand)]
     Tool(ToolCmd),
+    /// Turn Stillwright on by default for everyone who opens a repository
+    Init(InitArgs),
+}
+
+#[derive(clap::Args)]
+struct InitArgs {
+    /// Repository folder (default: current directory)
+    #[arg(long, default_value = ".")]
+    dir: PathBuf,
+    /// Only write .claude/settings.json (Claude Code)
+    #[arg(long)]
+    claude_only: bool,
+    /// Only write .github/copilot/settings.json (GitHub Copilot)
+    #[arg(long)]
+    copilot_only: bool,
 }
 
 #[derive(Subcommand)]
@@ -576,6 +591,105 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> R
     Ok(())
 }
 
+// ---------------------------------------------------------------- init
+
+const MARKETPLACE: &str = "stillwright";
+const MARKETPLACE_REPO: &str = "HamzaIlyas/stillwright";
+
+/// Merge the two plugin keys into a settings file, keeping everything else in it.
+/// Both Claude Code (.claude/settings.json) and GitHub Copilot (.github/copilot/settings.json)
+/// read `extraKnownMarketplaces` and `enabledPlugins` in this shape.
+fn enable_in_settings(path: &Path) -> Result<bool> {
+    let mut root: serde_json::Value = match fs::read_to_string(path) {
+        Ok(text) if text.trim().is_empty() => serde_json::json!({}),
+        Ok(text) => serde_json::from_str(&text).map_err(|e| {
+            format!(
+                "{} is not valid JSON ({e}); fix it, then retry",
+                path.display()
+            )
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    if !root.is_object() {
+        return Err(format!("{} must hold a JSON object", path.display()));
+    }
+    let before = root.clone();
+    let obj = root.as_object_mut().expect("checked above");
+    let markets = obj
+        .entry("extraKnownMarketplaces")
+        .or_insert_with(|| serde_json::json!({}));
+    if !markets.is_object() {
+        return Err(format!(
+            "{}: extraKnownMarketplaces is not an object",
+            path.display()
+        ));
+    }
+    markets
+        .as_object_mut()
+        .expect("checked")
+        .entry(MARKETPLACE)
+        .or_insert_with(
+            || serde_json::json!({ "source": { "source": "github", "repo": MARKETPLACE_REPO } }),
+        );
+    let plugins = obj
+        .entry("enabledPlugins")
+        .or_insert_with(|| serde_json::json!({}));
+    if !plugins.is_object() {
+        return Err(format!(
+            "{}: enabledPlugins is not an object",
+            path.display()
+        ));
+    }
+    plugins.as_object_mut().expect("checked").insert(
+        format!("{MARKETPLACE}@{MARKETPLACE}"),
+        serde_json::Value::Bool(true),
+    );
+    if root == before {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())? + "\n";
+    fs::write(path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(true)
+}
+
+fn init(args: InitArgs) -> Result<()> {
+    if !args.dir.is_dir() {
+        return Err(format!("{} is not a folder", args.dir.display()));
+    }
+    let both = !args.claude_only && !args.copilot_only;
+    let mut targets: Vec<(&str, PathBuf)> = Vec::new();
+    if both || args.claude_only {
+        targets.push((
+            "Claude Code",
+            args.dir.join(".claude").join("settings.json"),
+        ));
+    }
+    if both || args.copilot_only {
+        targets.push((
+            "GitHub Copilot",
+            args.dir
+                .join(".github")
+                .join("copilot")
+                .join("settings.json"),
+        ));
+    }
+    for (name, path) in targets {
+        let changed = enable_in_settings(&path)?;
+        println!(
+            "{name}: {} {}",
+            if changed { "updated" } else { "already set" },
+            path.display()
+        );
+    }
+    println!("Commit these files. Contributors get Stillwright once they trust the folder (Claude Code) or open it (Copilot).");
+    Ok(())
+}
+
 // ---------------------------------------------------------------- commands
 
 fn run(cli: Cli) -> Result<()> {
@@ -592,6 +706,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Inbox(cmd) => inbox(&store, cmd),
         Cmd::Note(cmd) => note(&store, cmd),
         Cmd::Tool(cmd) => tool(&store, cmd),
+        Cmd::Init(args) => init(args),
     }
 }
 

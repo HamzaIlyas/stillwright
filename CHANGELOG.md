@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+- `sw init`: writes the repo-level settings that turn Stillwright on by default in Claude Code and GitHub Copilot.
+- README: `npx plugins add` / `npx skills add` one-liners; `.agents/skills` mirror; GitHub topics for the Gemini gallery.
+
 ## 0.1.2 - 2026-10-24
 - docs/evals.md: re-run after the skill change; all three runs within five lines.
 - sw-scout: references/vetted-tools.md, a checked starter list with an avoid list.

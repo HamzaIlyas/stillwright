@@ -90,6 +90,18 @@ Schedule one loop per hour, for example from cron on Linux/macOS:
 Unattended runs never push, deploy, publish, send or install anything new. Those wait as
 review cards for when you're back. Details: [unattended runs](../skills/stillwright/references/unattended.md).
 
+## Turn it on for your whole team
+
+From the root of a repository:
+
+```sh
+sw init
+```
+
+It adds Stillwright to `.claude/settings.json` and `.github/copilot/settings.json` without
+touching your other settings (run it twice and nothing changes). Commit both files: Claude Code
+installs the plugin once a contributor trusts the folder; Copilot reads it on open.
+
 ## Where things live
 
 ```

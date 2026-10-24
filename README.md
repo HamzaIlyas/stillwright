@@ -25,6 +25,15 @@ that reads [Agent Skills](https://agentskills.io).
 
 ## Install
 
+One line for most agents (Claude Code, Cursor, Codex, Copilot CLI, VS Code, and 70+ others):
+
+```sh
+npx plugins add HamzaIlyas/stillwright     # plugin, where the agent supports plugins
+npx skills add HamzaIlyas/stillwright      # skills only, works almost everywhere
+```
+
+Or the agent's own way:
+
 | Agent | Command |
 |---|---|
 | Claude Code | `claude plugin marketplace add HamzaIlyas/stillwright` then `claude plugin install stillwright@stillwright` |
@@ -33,6 +42,10 @@ that reads [Agent Skills](https://agentskills.io).
 | Cursor | loads the root `plugin.json` (Agent Plugins standard); marketplace listing pending |
 | OpenCode, or any Agent Skills agent | `npx skills add HamzaIlyas/stillwright` |
 | Hermes Agent | `git clone --depth 1 https://github.com/HamzaIlyas/stillwright /tmp/stillwright && mkdir -p ~/.hermes/skills/stillwright && cp -R /tmp/stillwright/skills/. ~/.hermes/skills/stillwright/` (picked up on the next message; `/skills list` shows them) |
+
+For a whole team: run `sw init` in the repository and commit the two files it writes
+(`.claude/settings.json`, `.github/copilot/settings.json`). Everyone who opens the repo gets
+Stillwright in Claude Code (after trusting the folder) and GitHub Copilot.
 
 The skills need the `sw` binary (a single file, no runtime). Any of these installs it:
 

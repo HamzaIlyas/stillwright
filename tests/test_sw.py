@@ -250,3 +250,40 @@ class StatusTests(SwTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InitTests(SwTestCase):
+    def test_init_writes_both_settings_files(self):
+        repo = self.home / "repo"
+        repo.mkdir()
+        out = self.sw("init", "--dir", str(repo))
+        self.assertIn("Claude Code: updated", out)
+        self.assertIn("GitHub Copilot: updated", out)
+        for rel in (".claude/settings.json", ".github/copilot/settings.json"):
+            data = json.loads((repo / rel).read_text())
+            self.assertEqual(data["enabledPlugins"], {"stillwright@stillwright": True})
+            self.assertEqual(data["extraKnownMarketplaces"]["stillwright"]["source"],
+                             {"source": "github", "repo": "HamzaIlyas/stillwright"})
+
+    def test_init_keeps_existing_keys_and_is_idempotent(self):
+        repo = self.home / "repo"
+        (repo / ".claude").mkdir(parents=True)
+        (repo / ".claude" / "settings.json").write_text(json.dumps({
+            "permissions": {"allow": ["Bash(npm test)"]},
+            "enabledPlugins": {"other@market": True},
+        }))
+        self.sw("init", "--dir", str(repo), "--claude-only")
+        data = json.loads((repo / ".claude" / "settings.json").read_text())
+        self.assertEqual(data["permissions"], {"allow": ["Bash(npm test)"]})
+        self.assertEqual(data["enabledPlugins"], {"other@market": True, "stillwright@stillwright": True})
+        self.assertFalse((repo / ".github").exists())
+        self.assertIn("already set", self.sw("init", "--dir", str(repo), "--claude-only"))
+
+    def test_init_refuses_broken_json_and_missing_dir(self):
+        repo = self.home / "repo"
+        (repo / ".claude").mkdir(parents=True)
+        (repo / ".claude" / "settings.json").write_text("{broken")
+        with self.assertRaises(Failed):
+            self.sw("init", "--dir", str(repo))
+        with self.assertRaises(Failed):
+            self.sw("init", "--dir", str(self.home / "nope"))
