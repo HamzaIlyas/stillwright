@@ -5,3 +5,4 @@
 - `sw` state keeper in Rust: goals, runs, inbox, notes with validity, hash-pinned tools.
 - Packaging for Claude Code, Codex, Gemini CLI and Agent Skills agents.
 - README: badges, cited research behind each rule, Folvix link; issue and PR templates.
+- Codex-native marketplace file (.agents/plugins/marketplace.json); install table covers Cursor and OpenCode.

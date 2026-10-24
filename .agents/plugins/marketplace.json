@@ -1,0 +1,20 @@
+{
+  "name": "stillwright",
+  "interface": {
+    "displayName": "Stillwright"
+  },
+  "plugins": [
+    {
+      "name": "stillwright",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

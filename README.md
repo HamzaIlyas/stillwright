@@ -26,9 +26,10 @@ that reads [Agent Skills](https://agentskills.io).
 | Agent | Command |
 |---|---|
 | Claude Code | `claude plugin marketplace add HamzaIlyas/stillwright` then `claude plugin install stillwright@stillwright` |
-| Codex | `codex plugin marketplace add HamzaIlyas/stillwright` |
+| Codex | `codex plugin marketplace add HamzaIlyas/stillwright`, then install Stillwright from `/plugins` |
 | Gemini CLI | `gemini extensions install https://github.com/HamzaIlyas/stillwright` |
-| Any Agent Skills agent | `npx skills add HamzaIlyas/stillwright` |
+| Cursor | loads the root `plugin.json` (Agent Plugins standard); marketplace listing pending |
+| OpenCode, or any Agent Skills agent | `npx skills add HamzaIlyas/stillwright` |
 
 The skills need the `sw` binary (a single file, no runtime). Any of these installs it:
 
