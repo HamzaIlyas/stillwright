@@ -53,6 +53,7 @@ def check_manifests() -> list:
     manifests = {
         "plugin.json": json.loads((ROOT / "plugin.json").read_text()),
         ".claude-plugin/plugin.json": json.loads((ROOT / ".claude-plugin/plugin.json").read_text()),
+        ".codex-plugin/plugin.json": json.loads((ROOT / ".codex-plugin/plugin.json").read_text()),
         "gemini-extension.json": json.loads((ROOT / "gemini-extension.json").read_text()),
     }
     for path, data in manifests.items():
