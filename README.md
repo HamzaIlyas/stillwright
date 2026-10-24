@@ -48,6 +48,8 @@ to a release version), when you are present to approve it.
 ## Use
 
 New here? The [quickstart](docs/quickstart.md) takes ten minutes, and CI runs every command in it.
+Also: [troubleshooting](docs/troubleshooting.md), [Windows notes](docs/windows.md), and a
+[real example run](examples/quickstart-run/README.md).
 
 Tell your agent a goal, or just say **"stillwright"**. The first time, it asks a few short
 questions to get to know you. After that:
