@@ -1,0 +1,23 @@
+name: Bug
+description: Something does not work as the README or a skill says
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: sw version and agent
+      placeholder: "sw 0.1.0, Claude Code 2.1 on macOS"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command or prompt, what you expected, what you got. Paste exact output.
+    validations:
+      required: true
+  - type: textarea
+    id: state
+    attributes:
+      label: Output of `sw status`
+      render: text

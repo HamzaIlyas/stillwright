@@ -1,0 +1,20 @@
+name: Idea
+description: A gap you hit, or something Stillwright should do
+labels: [idea]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem you had
+      description: What were you trying to get done, and where did it fail or cost you time?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would have helped
+  - type: input
+    id: prior
+    attributes:
+      label: Does another tool already do this?
+      placeholder: "link, or 'not that I found'"

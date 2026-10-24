@@ -1,5 +1,9 @@
 # Stillwright
 
+[![CI](https://github.com/HamzaIlyas/stillwright/actions/workflows/ci.yml/badge.svg)](https://github.com/HamzaIlyas/stillwright/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/HamzaIlyas/stillwright)](https://github.com/HamzaIlyas/stillwright/releases/latest)
+[![License](https://img.shields.io/github/license/HamzaIlyas/stillwright)](LICENSE)
+
 **A quiet maker for your AI agent.** It gets to know you, then keeps working on your goals:
 plans them, finds and vets the right tools, proves every step, and only speaks when it
 needs you, in five lines or fewer.
@@ -72,13 +76,27 @@ never push, deploy, publish or install anything new; those wait in your inbox.
 All state is plain files in `~/.stillwright` (profile, goals, inbox, notes, pinned tools,
 run logs). Nothing leaves your machine except what your agent already sends.
 
-`sw` is written in Rust: one small binary per platform, instant start, and a compiler that
-rejects whole classes of bugs before anything runs, which matters for a tool that will later
-run as a background service and extend itself.
+`sw` is a single Rust binary, so there is nothing to install besides it, and it is ready to
+become a background service later.
 
 ## Status
 
-v0.1. The rules are built on published research about where agents fail (self-judged
-"done", interrupting too much, malicious skills, runaway costs). Issues and PRs welcome.
+v0.1. Each rule answers a failure that has been measured or reported, not a hunch:
 
-MIT © Hamza Ilyas · Built at Folvix.
+- Agents mark work done without testing it: Anthropic's
+  [notes on long-running agent harnesses](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents).
+  Hence independent, default-fail checks.
+- Agents rarely ask for help at the right moment and fill gaps with wrong assumptions:
+  [HiL-Bench](https://arxiv.org/abs/2604.09408). Hence the typed inbox with silence as default.
+- Reliability drops sharply on tasks longer than a few hours:
+  [METR time horizons](https://metr.org/time-horizons/). Hence small, checkable steps.
+- Hundreds of malicious skills were found on a public skill registry in early 2026 (341 of 2,857 scanned):
+  [Snyk ToxicSkills](https://snyk.io/articles/skill-md-shell-access/),
+  [Unit 42](https://unit42.paloaltonetworks.com/openclaw-ai-supply-chain-risk/).
+  Hence vetting, approval and hash-pinning before any third-party tool runs.
+- Agents act on stale memory in most cases when a constraint has changed:
+  [arXiv 2608.25553](https://arxiv.org/abs/2608.25553). Hence dated notes that are retired, not overwritten.
+
+Issues and PRs welcome. Found a gap? Open an [idea](https://github.com/HamzaIlyas/stillwright/issues/new?template=idea.yml).
+
+MIT © Hamza Ilyas · Built at [Folvix](https://huggingface.co/Folvix).
