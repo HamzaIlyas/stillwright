@@ -12,6 +12,9 @@ what Stillwright leaves behind:
   and the check rerun before the step was marked passed. That is the loop working.
 - `inbox.json`: the single `notify` card the user saw. Nothing else was said.
 
+One honest flaw left as is: the log and the card say "12 commands"; the quickstart has 13.
+The count was typed by hand, the check itself ran all 13.
+
 Reproduce the checks yourself from the repo root, after `cargo build --release`:
 
 ```sh

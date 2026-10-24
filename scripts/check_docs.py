@@ -38,6 +38,7 @@ def commands(markdown: str):
 def main(paths) -> int:
     sw = binary()
     failures = 0
+    ran = 0
     for path in paths:
         text = pathlib.Path(path).read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as home:
@@ -46,11 +47,15 @@ def main(paths) -> int:
                 may_fail = cmd.endswith("# may fail")
                 argv = shlex.split(cmd[: -len("# may fail")] if may_fail else cmd)[1:]
                 result = subprocess.run([sw, *argv], env=env, capture_output=True, text=True, cwd=home)
+                ran += 1
                 ok = result.returncode == 0 or may_fail
                 print(f"{'ok  ' if ok else 'FAIL'} {path}: {cmd}")
                 if not ok:
                     print(result.stderr.strip() or result.stdout.strip())
                     failures += 1
+    if ran == 0:
+        print("no `sw` commands found in the given docs; nothing was checked")
+        return 1
     return 1 if failures else 0
 
 

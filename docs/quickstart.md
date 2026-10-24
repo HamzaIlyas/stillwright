@@ -54,7 +54,7 @@ sw goal list
 ## 4. Let it work
 
 Say "stillwright" or give it a goal. It plans in a run folder, shows you the plan if it has
-outward actions, does the work, and verifies each step. Watch from outside at any time:
+outward actions or the goal is new to you, does the work, and verifies each step. Watch from outside at any time:
 
 ```sh
 sw status
