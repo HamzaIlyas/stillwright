@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- `sw status` shows the top open goal and the ask/review cards that need the user.
+- Evals published as a Hugging Face dataset (Folvix/stillwright-evals); judge report and per-run timing committed.
 - Homebrew: `brew install HamzaIlyas/tap/stillwright` (formula published to HamzaIlyas/homebrew-tap on each release).
 - sw-forge: forge only on logged triggers, evidence file required, old-vs-new eval before install, rollback copy, usage tracking and a retire card (design from SkillsBench, Hermes, Prime Agent, ECC, skill-creator).
 

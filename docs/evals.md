@@ -2,7 +2,8 @@
 
 Measured, not claimed. Three small real tasks, each done twice by a fresh agent of the same
 model (Claude Sonnet): once told to follow the Stillwright skills, once with no skill at all.
-Everything below can be re-checked from [`docs/evals/2026-10-24/`](evals/2026-10-24/): the
+Everything below can be re-checked from [`docs/evals/2026-10-24/`](evals/2026-10-24/) (also published as a
+[dataset on Hugging Face](https://huggingface.co/datasets/Folvix/stillwright-evals)): the
 tasks, every agent's work and report, the Stillwright plans and logs, and the grading script.
 
 ## Tasks

@@ -9,7 +9,6 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
-
 def find_binary() -> str:
     if os.environ.get("SW_BIN"):
         return os.environ["SW_BIN"]
@@ -20,13 +19,10 @@ def find_binary() -> str:
                 return str(candidate)
     raise SystemExit("sw binary not found: run `cargo build --release` or set SW_BIN")
 
-
 SW = find_binary()
-
 
 class Failed(Exception):
     pass
-
 
 class SwTestCase(unittest.TestCase):
     def setUp(self):
@@ -41,7 +37,6 @@ class SwTestCase(unittest.TestCase):
             raise Failed(result.stderr.strip())
         return result.stdout
 
-
 class GoalTests(SwTestCase):
     def test_add_list_done(self):
         self.sw("goal", "add", "Ship v0.1", "--priority", "1")
@@ -55,7 +50,6 @@ class GoalTests(SwTestCase):
     def test_unknown_id_exits(self):
         with self.assertRaises(Failed):
             self.sw("goal", "done", "99")
-
 
 class RunTests(SwTestCase):
     def test_next_step_follows_plan_and_results(self):
@@ -115,7 +109,6 @@ class RunTests(SwTestCase):
         self.sw("run", "new", "x")
         self.assertIn("write plan.md", self.sw("run", "status"))
 
-
 class InboxTests(SwTestCase):
     def test_asks_sort_before_ideas_and_close(self):
         self.sw("inbox", "add", "idea", "Try a newsletter")
@@ -147,7 +140,6 @@ class InboxTests(SwTestCase):
         with self.assertRaises(Failed):
             self.sw("inbox", "add", "spam", "nope")
 
-
 class NoteTests(SwTestCase):
     def test_retired_notes_hidden_but_kept(self):
         self.sw("note", "add", "Prefers short replies", "--source", "chat 2026-10-16", "--kind", "preference")
@@ -158,7 +150,6 @@ class NoteTests(SwTestCase):
     def test_source_is_required(self):
         with self.assertRaises(Failed):
             self.sw("note", "add", "unsourced claim")
-
 
 class ToolTests(SwTestCase):
     def hash_of(self, path):
@@ -224,14 +215,12 @@ class ToolTests(SwTestCase):
         (tool / ".git" / "HEAD").write_text("ref")
         self.assertEqual(before, self.hash_of(tool))
 
-
 class CorruptStateTests(SwTestCase):
     def test_corrupt_json_gives_clear_error(self):
         (self.home / "goals.json").write_text("{broken")
         with self.assertRaises(Failed) as ctx:
             self.sw("status")
         self.assertIn("not valid JSON", str(ctx.exception))
-
 
 class StatusTests(SwTestCase):
     def test_status_summarises(self):
@@ -246,8 +235,10 @@ class StatusTests(SwTestCase):
         self.assertIn("profile: yes", out)
         self.assertIn("goals: 1 open", out)
         self.assertIn("ask 1", out)
-
-
+        self.assertIn("top goal: 1. g", out)
+        self.assertIn("needs you: 1. ask: q", out)
+        self.sw("inbox", "add", "notify", "fyi")
+        self.assertNotIn("fyi", self.sw("status"))
 
 class InitTests(SwTestCase):
     def test_init_writes_both_settings_files(self):
@@ -314,7 +305,6 @@ class InitTests(SwTestCase):
         data = json.loads((repo / ".claude" / "settings.json").read_text(encoding="utf-8"))
         self.assertEqual(data["a"], 1)
         self.assertIn("stillwright@stillwright", data["enabledPlugins"])
-
 
 if __name__ == "__main__":
     unittest.main()

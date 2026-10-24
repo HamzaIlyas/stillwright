@@ -77,7 +77,7 @@ Tell your agent a goal, or just say **"stillwright"**. The first time, it asks a
 questions to get to know you. After that:
 
 ```
-sw status          what's going on, in three lines
+sw status          what's going on, in a few lines
 sw inbox list      the only things that need you
 sw goal add "..."  give it more work
 ```

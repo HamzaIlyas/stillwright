@@ -746,6 +746,19 @@ fn status(store: &Store) -> Result<()> {
         line.push_str(&format!(" | answered {answered} (apply, then close)"));
     }
     println!("{line}");
+    if let Some(top) = goals
+        .iter()
+        .filter(|g| g.status == "open")
+        .min_by_key(|g| (g.priority, g.id))
+    {
+        println!("top goal: {}. {}", top.id, top.text);
+    }
+    for c in cards
+        .iter()
+        .filter(|c| c.status != "closed" && matches!(c.kind, Kind::Ask | Kind::Review))
+    {
+        println!("needs you: {}. {}: {}", c.id, c.kind.name(), c.title);
+    }
     if let Some(last) = store.runs()?.last() {
         let progress = Progress::of(last);
         println!(
