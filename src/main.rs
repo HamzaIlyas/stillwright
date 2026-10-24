@@ -18,9 +18,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Only VCS metadata is left out of a tool's hash: anything else (caches, vendored
-/// dependencies, build output) can carry code the tool will run, so it must count.
-const HASH_SKIP: &[&str] = &[".git"];
+/// Left out of a tool's hash: VCS metadata and files the OS or Python regenerate by merely
+/// running or browsing the tool (they would make every check cry wolf). Vendored
+/// dependencies and build output stay in, because the tool runs that code.
+const HASH_SKIP: &[&str] = &[".git", "__pycache__", ".DS_Store"];
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -333,8 +334,10 @@ impl Store {
                 .cloned()
                 .ok_or_else(|| "no runs yet".to_string());
         }
+        // A reference is a path only when written as one; a bare word is a run name or slug,
+        // so a same-named folder in the working directory cannot hijack it.
         let path = PathBuf::from(reference);
-        if path.is_dir() {
+        if reference.contains(['/', '\\']) || reference.starts_with('.') {
             let runs_dir = fs::canonicalize(self.root.join("runs")).map_err(|e| e.to_string())?;
             let given = fs::canonicalize(&path).map_err(|e| e.to_string())?;
             if given.parent() == Some(runs_dir.as_path()) {
@@ -520,7 +523,11 @@ fn content_hash(path: &Path) -> Result<String> {
     }
     let mut digest = Sha256::new();
     for (rel, file) in files {
-        let bytes = fs::read(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+        let bytes = if file.as_os_str().is_empty() {
+            Vec::new()
+        } else {
+            fs::read(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?
+        };
         digest.update(rel.as_bytes());
         digest.update([0u8]);
         digest.update(&bytes);
@@ -529,15 +536,34 @@ fn content_hash(path: &Path) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+fn rel_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
     for entry in fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))? {
         let path = entry.map_err(|e| e.to_string())?.path();
         if HASH_SKIP.contains(&file_name(&path).as_str()) {
             continue;
         }
-        if path.is_dir() {
+        // Symlinks are hashed by their target path, never followed: following them can loop
+        // forever (pnpm-style node_modules) or pull in files outside the tool.
+        let meta = fs::symlink_metadata(&path)
+            .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            let target = fs::read_link(&path).map_err(|e| e.to_string())?;
+            out.push((
+                rel_path(root, &path) + " -> " + &target.to_string_lossy(),
+                PathBuf::new(),
+            ));
+        } else if meta.is_dir() {
             collect_files(root, &path, out)?;
-        } else if path.is_file() {
+        } else if meta.is_file() {
             let rel = path.strip_prefix(root).unwrap_or(&path);
             let rel = rel
                 .components()

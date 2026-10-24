@@ -35,8 +35,8 @@ class SwTestCase(unittest.TestCase):
         self.home = pathlib.Path(self.tmp.name)
         self.env = {**os.environ, "STILLWRIGHT_HOME": self.tmp.name}
 
-    def sw(self, *argv):
-        result = subprocess.run([SW, *argv], env=self.env, capture_output=True, text=True)
+    def sw(self, *argv, cwd=None):
+        result = subprocess.run([SW, *argv], env=self.env, capture_output=True, text=True, cwd=cwd)
         if result.returncode != 0:
             raise Failed(result.stderr.strip())
         return result.stdout
@@ -94,6 +94,11 @@ class RunTests(SwTestCase):
         self.assertIn("alpha-1", self.sw("run", "status", "alpha-1"))
         with self.assertRaises(Failed):
             self.sw("run", "status", "1")
+
+    def test_bare_name_is_not_hijacked_by_cwd_folder(self):
+        self.sw("run", "new", "x")
+        (self.home / "x").mkdir()
+        self.assertIn("-x:", self.sw("run", "status", "x", cwd=str(self.home)))
 
     def test_passed_counts_only_plan_steps(self):
         run = pathlib.Path(self.sw("run", "new", "x").strip())
@@ -192,6 +197,24 @@ class ToolTests(SwTestCase):
         (tool / "node_modules" / "m.js").write_text("v2")
         with self.assertRaises(Failed):
             self.sw("tool", "check")
+
+    def test_hash_ignores_regenerated_caches(self):
+        tool = self.home / "c"
+        tool.mkdir()
+        (tool / "a.py").write_text("a")
+        before = self.hash_of(tool)
+        (tool / "__pycache__").mkdir()
+        (tool / "__pycache__" / "a.pyc").write_bytes(b"x")
+        (tool / ".DS_Store").write_bytes(b"x")
+        self.assertEqual(before, self.hash_of(tool))
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_symlink_cycle_does_not_hang(self):
+        tool = self.home / "s"
+        (tool / "pkg").mkdir(parents=True)
+        (tool / "pkg" / "loop").symlink_to(tool, target_is_directory=True)
+        self.sw("tool", "pin", "s", str(tool))
+        self.assertIn("s: ok", self.sw("tool", "check"))
 
     def test_hash_ignores_git_dir(self):
         tool = self.home / "t"
