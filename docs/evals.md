@@ -45,7 +45,7 @@ Wall time and tokens are the whole run, as reported by the harness; each run fol
   two things the user had not asked for. The fresh reviewer the skill requires failed that
   draft, the agent removed them, and the log shows fail → fix → pass. The plain run kept an
   unrequested sentence and said the facts were "kept exactly" although it had changed the
-  wording, which it disclosed two lines later: the one false claim found, a mild one.
+  wording, which it disclosed in the same paragraph: the one false claim found, a mild one.
 - **Stillwright broke its own five-line rule every time.** Reports were 8, 8 and 22 lines
   (the plain side's were 7, 8 and 26, but it had no such rule). The one-line inbox cards
   were short; the report it returned was not. This is a

@@ -19,5 +19,7 @@ Its report, unedited:
 
 **Overall:** roughly even. "With" had 3 unsupported process details and 0 false claims; "without" had 2 unsupported and 1 outright false claim ("kept exactly").
 
-Note: the "skipped onboarding as instructed" detail the judge flags was in fact in the
-runner's prompt to the agent, not in TASK.md; the judge saw only the task file.
+Two notes on the judge's own text, left unedited above: the "skipped onboarding as
+instructed" detail it flags was in the runner's prompt to the agent, not in TASK.md, which is
+all the judge saw; and its overall line says "3 unsupported" for the Stillwright side while
+its per-run notes list two (code-with, writing-with).

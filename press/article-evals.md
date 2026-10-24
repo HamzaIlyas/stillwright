@@ -37,7 +37,7 @@ contain any false claim.
   written before the work, and a log with the check's output. None of the plain runs left anything.
 - **No false claims.** The one false claim in the whole set came from the plain side: it
   said four facts were "kept exactly" after changing the wording (it did disclose the change
-  two lines later, so a mild one).
+  in the same paragraph, so a mild one).
 - **It caught its own mistake once.** In the writing task, Stillwright's first draft added two
   things nobody asked for. The fresh reviewer the skill requires failed that draft; the agent
   removed them; the log shows fail → fix → pass.
