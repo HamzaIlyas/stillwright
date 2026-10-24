@@ -42,7 +42,7 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/HamzaIlyas/stillwr
 cargo install --git https://github.com/HamzaIlyas/stillwright --locked
 ```
 
-On Linux and macOS the skills can also install it on first use (`scripts/get-sw.sh`, pinned
+On Linux and macOS the skills can also install it on first use (`skills/stillwright/scripts/get-sw.sh`, pinned
 to a release version), when you are present to approve it.
 
 ## Use
