@@ -80,7 +80,7 @@ column was not re-judged for this round.
 - Onboarding was skipped (no user to ask), so the profile and notes parts of the skill
   were not tested.
 - The grading script and the judge prompt were written by the skill's author. The judge is
-  a model, and its verdicts are in `results.json` and the run folders for anyone to dispute.
+  a model, and its verdicts are in `runs/results.json` and the run folders for anyone to dispute.
 - One harness quirk: the plain research agent was refused permission to write its report
   file, so for fairness every agent's returned text was saved as its report by the eval
   runner, identically for all six.
@@ -89,7 +89,8 @@ column was not re-judged for this round.
 
 ```sh
 cd docs/evals/2026-10-24
-python3 grade.py
+python3 grade.py runs      # first round, both sides
+python3 grade.py rerun-1   # Stillwright side after the skill change
 ```
 
 The script re-runs the tests, recounts the words, rechecks the facts and the logs. Only the
