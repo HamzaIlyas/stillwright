@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.4 - 2026-10-26
 - `sw status` shows the top open goal and the ask/review cards that need the user.
 - Evals published as a Hugging Face dataset (Folvix/stillwright-evals); judge report and per-run timing committed.
 - Homebrew: `brew install HamzaIlyas/tap/stillwright` (formula published to HamzaIlyas/homebrew-tap on each release).

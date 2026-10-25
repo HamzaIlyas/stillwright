@@ -57,7 +57,7 @@ pip install stillwright
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/HamzaIlyas/stillwright/releases/latest/download/stillwright-installer.sh | sh
 # Windows (PowerShell)
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/HamzaIlyas/stillwright/releases/latest/download/stillwright-installer.ps1 | iex"
-# macOS / Linux with Homebrew (from the next release)
+# macOS / Linux with Homebrew
 brew install HamzaIlyas/tap/stillwright
 # From source (needs Rust)
 cargo install --git https://github.com/HamzaIlyas/stillwright --locked

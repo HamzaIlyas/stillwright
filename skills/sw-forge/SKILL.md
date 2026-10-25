@@ -4,7 +4,7 @@ description: Builds a new skill (or small script or tool) when sw-scout finds no
 license: MIT
 metadata:
   author: Hamza Ilyas
-  version: "0.1.3"
+  version: "0.1.4"
 ---
 
 # Forge
