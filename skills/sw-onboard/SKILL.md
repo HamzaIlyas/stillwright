@@ -4,7 +4,7 @@ description: Stillwright's get-to-know-you step. Learns who the user is, what th
 license: MIT
 metadata:
   author: Hamza Ilyas
-  version: "0.1.4"
+  version: "0.1.5"
 ---
 
 # Onboard

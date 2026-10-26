@@ -4,7 +4,7 @@ description: Stillwright's proactive scan. Looks at the user's profile, goals an
 license: MIT
 metadata:
   author: Hamza Ilyas
-  version: "0.1.4"
+  version: "0.1.5"
 ---
 
 # Radar

@@ -9,7 +9,7 @@ background: false
 license: MIT
 metadata:
   author: Hamza Ilyas
-  version: "0.1.4"
+  version: "0.1.5"
 ---
 
 # Worker
