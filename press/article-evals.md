@@ -69,6 +69,23 @@ wasn't re-run):
 All three now meet the rule with the proof still in the message. Wall time also dropped to
 about half of the plain runs' first-round times; one re-run is not enough to call that real.
 
+## Then I measured money instead of tokens
+
+Token counts from inside a harness are not a bill. So I ran the same three tasks again as
+headless `claude -p` sessions, where Claude Code itself reports the dollars: with Stillwright
+$0.92 in total, without $0.80. Both sides finished every task. No saving, and I am not going
+to describe it as one. Two earlier priced rounds had to be thrown away because my harness had
+denied the agents permission to run tests; those receipts measured permission failures.
+
+While checking what the popular cost-saving tools actually measure, I found that the ones
+claiming 30–50% publish no method, and the one with an independent measurement saves about
+5%. So the thing worth shipping was the measuring: an A/B cost harness, `sw run cost`
+(dollars per run at prices you set), and `sw cache`, which reads a session transcript and
+names the turns that rewrote the prompt cache. On one 523-turn session of mine it found
+4.5 million tokens rewritten at 15 break points: pauses long enough for the cache to expire,
+large new content, and one model switch.
+All of it is in the dataset and in `docs/cost.md`.
+
 ## What this does and doesn't show
 
 Three tasks, one run each per side, same model on both sides, tasks that fit in a single
@@ -78,8 +95,8 @@ written by me, the author. The raw run folders, the plans and logs, the grading 
 judge's full report are all in the repository, so anyone can re-grade or dispute them:
 github.com/HamzaIlyas/stillwright, `docs/evals.md`.
 
-The honest summary: on small tasks it doesn't make the agent more capable; it makes the
-agent's work checkable, and it keeps it from claiming things it didn't do. Whether that is
-worth twice the time depends on how much a wrong "done" costs you.
+The honest summary: on small tasks it doesn't make the agent more capable or cheaper; it makes
+the agent's work checkable, keeps it from claiming things it didn't do, and now gives you the
+tools to check anyone's cost claim, including mine.
 
 Install: `pip install stillwright` and `npx skills add HamzaIlyas/stillwright`. MIT.
