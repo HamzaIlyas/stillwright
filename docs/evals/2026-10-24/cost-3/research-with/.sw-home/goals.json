@@ -1,0 +1,11 @@
+[
+  {
+    "id": 1,
+    "text": "Report latest stillwright version on PyPI and GitHub, match, release date, with URLs",
+    "priority": 1,
+    "status": "done",
+    "created": "2026-10-26T15:57:51",
+    "closed": "2026-10-26T15:58:07",
+    "note": ""
+  }
+]

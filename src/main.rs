@@ -157,6 +157,11 @@ enum Cmd {
     Tool(ToolCmd),
     /// Turn Stillwright on by default for everyone who opens a repository
     Init(InitArgs),
+    /// Read a Claude Code session transcript and name the turns that broke the prompt cache
+    Cache {
+        /// Path to the session .jsonl (Claude Code keeps them under ~/.claude/projects/)
+        file: PathBuf,
+    },
 }
 
 #[derive(clap::Args)]
@@ -208,6 +213,11 @@ enum RunCmd {
         run: String,
     },
     List,
+    /// Money spent in a run: sums logged `model=`, `in=`, `out=` tokens at prices.json rates
+    Cost {
+        #[arg(default_value = "latest")]
+        run: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -591,6 +601,154 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> R
     Ok(())
 }
 
+// ---------------------------------------------------------------- cache
+
+struct Turn {
+    ts: String,
+    model: String,
+    input: f64,
+    created: f64,
+    read: f64,
+    output: f64,
+}
+
+/// A cache "break" is a turn that had to write a large prefix again instead of reading it.
+/// The threshold is a heuristic: at least 5K tokens written and at least a quarter of what the
+/// previous turn read, so normal growth (the new turn's own text) is not reported.
+fn cache_report(store: &Store, file: &Path) -> Result<()> {
+    let text =
+        fs::read_to_string(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+    let mut seen = std::collections::HashSet::new();
+    let mut turns: Vec<Turn> = Vec::new();
+    for line in text.lines() {
+        let Ok(e) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if e.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(msg) = e.get("message") else {
+            continue;
+        };
+        let Some(usage) = msg.get("usage") else {
+            continue;
+        };
+        let id = msg
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !id.is_empty() && !seen.insert(id) {
+            continue; // the same API response is logged once per content block
+        }
+        let num = |k: &str| usage.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        turns.push(Turn {
+            ts: e
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .chars()
+                .take(19)
+                .collect(),
+            model: msg
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string(),
+            input: num("input_tokens"),
+            created: num("cache_creation_input_tokens"),
+            read: num("cache_read_input_tokens"),
+            output: num("output_tokens"),
+        });
+    }
+    if turns.is_empty() {
+        return Err("no assistant turns with usage found in that file".into());
+    }
+    let (mut input, mut created, mut read, mut output) = (0.0, 0.0, 0.0, 0.0);
+    for t in &turns {
+        input += t.input;
+        created += t.created;
+        read += t.read;
+        output += t.output;
+    }
+    let prefix = input + created + read;
+    let hit = if prefix > 0.0 {
+        100.0 * read / prefix
+    } else {
+        0.0
+    };
+    println!(
+        "{} turns | prefix tokens: read {:.0} ({hit:.0}% cached), written {:.0}, uncached {:.0} | output {:.0}",
+        turns.len(),
+        read,
+        created,
+        input,
+        output
+    );
+    let mut breaks = 0;
+    let mut wasted = 0.0;
+    for i in 1..turns.len() {
+        let (prev, cur) = (&turns[i - 1], &turns[i]);
+        let big = cur.created >= 5000.0 && cur.created >= prev.read * 0.25;
+        if !big {
+            continue;
+        }
+        breaks += 1;
+        wasted += cur.created;
+        let gap_min = minutes_between(&prev.ts, &cur.ts);
+        let cause = if cur.model != prev.model {
+            format!("model switched {} -> {}", prev.model, cur.model)
+        } else if gap_min >= 60.0 {
+            format!("the cache expired during a {:.0}-minute pause", gap_min)
+        } else if prev.read > 0.0 && cur.read < prev.read * 0.5 {
+            "prefix changed: compaction, a settings/hook/MCP change, or an edited system prompt"
+                .to_string()
+        } else {
+            "large new content entered the prefix (tool output or a long message)".to_string()
+        };
+        println!(
+            "turn {}: {} wrote {:.0} tokens (read {:.0} -> {:.0}): likely {cause}",
+            i + 1,
+            cur.ts,
+            cur.created,
+            prev.read,
+            cur.read
+        );
+    }
+    if breaks == 0 {
+        println!("no cache breaks found");
+    } else {
+        println!("{breaks} cache break(s), {wasted:.0} tokens rewritten");
+        // A 5-minute cache write costs 1.25x the input price; a read costs the model's
+        // cache-read price (a tenth of input when prices.json does not say). The difference is
+        // an upper bound on the waste: content that was genuinely new could never have been a read.
+        let prices_path = store.root.join("prices.json");
+        if let Ok(text) = fs::read_to_string(&prices_path) {
+            if let Ok(prices) = serde_json::from_str::<BTreeMap<String, Price>>(&text) {
+                let model = &turns[0].model;
+                if let Some(p) = lookup(&prices, model) {
+                    let read = p.read.unwrap_or(p.input * 0.1);
+                    let usd = wasted * (1.25 * p.input - read) / 1_000_000.0;
+                    println!("at most about ${usd:.4} above cache-read price for those rewrites ({model})");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Minutes between two ISO timestamps like 2026-10-26T10:00:00; 0 when either is unreadable.
+fn minutes_between(a: &str, b: &str) -> f64 {
+    let parse = |s: &str| {
+        s.get(..19)
+            .and_then(|head| chrono::NaiveDateTime::parse_from_str(head, "%Y-%m-%dT%H:%M:%S").ok())
+    };
+    match (parse(a), parse(b)) {
+        (Some(x), Some(y)) => (y - x).num_seconds() as f64 / 60.0,
+        _ => 0.0,
+    }
+}
+
 // ---------------------------------------------------------------- init
 
 const MARKETPLACE: &str = "stillwright";
@@ -711,6 +869,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Note(cmd) => note(&store, cmd),
         Cmd::Tool(cmd) => tool(&store, cmd),
         Cmd::Init(args) => init(args),
+        Cmd::Cache { file } => cache_report(&store, &file),
     }
 }
 
@@ -878,6 +1037,95 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                 println!("{}  {}/{}", file_name(dir), p.passed(), p.total());
             }
         }
+        RunCmd::Cost { run } => run_cost(store, &store.resolve_run(&run)?)?,
+    }
+    Ok(())
+}
+
+/// Price per million tokens for one model, read from `prices.json` in the state folder:
+/// `{"claude-haiku-4-5": {"in": 1.0, "out": 5.0}, ...}`. The user fills it from the vendor's
+/// pricing page; sw never guesses a price.
+#[derive(Deserialize)]
+struct Price {
+    #[serde(rename = "in")]
+    input: f64,
+    #[serde(rename = "out")]
+    output: f64,
+    /// Cache-read price per million; when absent, a tenth of the input price is assumed.
+    #[serde(default)]
+    read: Option<f64>,
+}
+
+/// Claude Code reports dated ids such as `claude-haiku-4-5-20251001`; prices are keyed by the
+/// undated name, so strip one trailing `-YYYYMMDD`.
+fn price_key(model: &str) -> &str {
+    if let Some((head, tail)) = model.rsplit_once('-') {
+        if tail.len() == 8 && tail.chars().all(|c| c.is_ascii_digit()) {
+            return head;
+        }
+    }
+    model
+}
+
+fn lookup<'a>(prices: &'a BTreeMap<String, Price>, model: &str) -> Option<&'a Price> {
+    prices.get(model).or_else(|| prices.get(price_key(model)))
+}
+
+fn run_cost(store: &Store, run: &Path) -> Result<()> {
+    let prices_path = store.root.join("prices.json");
+    let prices: BTreeMap<String, Price> = match fs::read_to_string(&prices_path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map_err(|e| format!("{} is not valid ({e})", prices_path.display()))?,
+        Err(_) => BTreeMap::new(),
+    };
+    let text = fs::read_to_string(run.join("log.jsonl")).unwrap_or_default();
+    // per model: (input tokens, output tokens)
+    let mut used: BTreeMap<String, (f64, f64)> = BTreeMap::new();
+    for line in text.lines() {
+        let Ok(e) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(line) else {
+            continue;
+        };
+        let Some(model) = e.get("model").map(value_str) else {
+            continue;
+        };
+        let num = |k: &str| {
+            e.get(k)
+                .map(value_str)
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.0)
+        };
+        let entry = used.entry(model).or_insert((0.0, 0.0));
+        entry.0 += num("in");
+        entry.1 += num("out");
+    }
+    if used.is_empty() {
+        println!(
+            "no token usage logged (add model=<name> in=<tokens> out=<tokens> to run log lines)"
+        );
+        return Ok(());
+    }
+    let mut total = 0.0;
+    let mut unpriced = Vec::new();
+    for (model, (i, o)) in &used {
+        match lookup(&prices, model) {
+            Some(p) => {
+                let cost = (i * p.input + o * p.output) / 1_000_000.0;
+                total += cost;
+                println!("{model}: in {i:.0}, out {o:.0}, ${cost:.4}");
+            }
+            None => {
+                unpriced.push(model.clone());
+                println!("{model}: in {i:.0}, out {o:.0}, no price in prices.json");
+            }
+        }
+    }
+    println!("total: ${total:.4}");
+    if !unpriced.is_empty() {
+        return Err(format!(
+            "no price for {}; add it to {}",
+            unpriced.join(", "),
+            prices_path.display()
+        ));
     }
     Ok(())
 }

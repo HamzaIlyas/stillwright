@@ -14,6 +14,10 @@ metadata:
 Quality drops and cost rises as context fills: early decisions get lost and huge outputs
 crowd out the task. Treat context as the scarcest resource in the run.
 
+Anthropic's own measurements (platform.claude.com, "optimizing for cost"): trimming inputs
+saves 21–26%, pruning tool results over 2K characters saves 39% on long runs, compacting at
+90K instead of 150K tokens cuts cost per request by 70%.
+
 ## While working
 
 - **Delegate reading.** Wide searches, long files and logs go to a subagent that returns

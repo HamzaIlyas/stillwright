@@ -1,0 +1,4 @@
+{"ts":"2026-10-26T15:57:51","event":"start","goal":"1"}
+{"ts":"2026-10-26T15:58:07","step":"1","who":"bash","model":"none","check":"HTTP 200, version 0.1.4","result":"pass","note":"pypi"}
+{"ts":"2026-10-26T15:58:07","step":"2","who":"bash","model":"none","check":"HTTP 200, tag v0.1.4","result":"pass","note":"github"}
+{"ts":"2026-10-26T15:58:07","step":"3","who":"self","model":"sonnet","check":"report.md has URLs","result":"pass","note":"report.md written"}

@@ -25,6 +25,12 @@ claim nobody checked. The worker's own report is evidence to check, never the ve
 - **Tests are read-only to the worker.** If a worker edited tests or check scripts to make
   them pass, that's a fail until a human agrees.
 
+## When a reviewer is needed at all
+
+A command that exits 0 is the cheapest and most honest verdict there is. Use a model reviewer
+only for work no command can judge (prose, research, design), and run it on the small model
+in a fresh context: it reads the output and the check, nothing else, so it costs cents.
+
 ## Kinds of checks
 
 | Work | Check |

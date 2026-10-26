@@ -9,7 +9,14 @@ import subprocess
 
 E = pathlib.Path(__file__).resolve().parent
 FACTS = ["2021", "Lahore", "400", "50"]
-TRUTH = {"version": "0.1.1", "date": "2026-10-24"}
+import json as _json, urllib.request as _u
+def _truth():
+    try:
+        d=_json.load(_u.urlopen("https://api.github.com/repos/HamzaIlyas/stillwright/releases/latest", timeout=20))
+        return {"version": d["tag_name"].lstrip("v"), "date": d["published_at"][:10]}
+    except Exception:
+        return {"version": "0.1.1", "date": "2026-10-24"}
+TRUTH = _truth()
 
 
 def report(run):

@@ -1,0 +1,11 @@
+[
+  {
+    "id": 1,
+    "kind": "notify",
+    "title": "stillwright: PyPI 0.1.4 = GitHub v0.1.4 (match); GitHub release published 2026-10-25 19:58 UTC",
+    "body": "PyPI https://pypi.org/pypi/stillwright/json ; GitHub https://api.github.com/repos/HamzaIlyas/stillwright/releases/latest ; report: /private/tmp/claude-501/-Users-apple-custom-programming-django/9b58af56-9707-454c-b738-838056158ec4/scratchpad/cost-3/research-with/report.md",
+    "run": "",
+    "status": "open",
+    "created": "2026-10-26T15:58:13"
+  }
+]

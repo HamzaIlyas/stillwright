@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+- `sw run cost` (dollars per run from logged tokens at `prices.json` rates) and `sw cache` (names the turns that broke the prompt cache in a Claude Code transcript).
+- Cost rules in the stillwright skill, `sw-worker` forked small-model skill, docs/cost.md, docs/prices.example.json, and the A/B cost harness docs/evals/run_eval.py; priced eval round in docs/evals.md (no saving on small tasks, stated as such).
+- sw-scout vetted list: codeburn, ccusage, rtk; routers that proxy keys listed under avoid.
+
 ## 0.1.4 - 2026-10-26
 - `sw status` shows the top open goal and the ask/review cards that need the user.
 - Evals published as a Hugging Face dataset (Folvix/stillwright-evals); judge report and per-run timing committed.

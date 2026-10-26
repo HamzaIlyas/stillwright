@@ -72,6 +72,38 @@ and fact check, URLs). Wall time also dropped to about half of the plain runs' f
 times; one re-run is not enough to say that is real rather than variance. The "false claims"
 column was not re-judged for this round.
 
+## Priced round (2026-10-26)
+
+The first two rounds measured tokens from inside the harness. This round ran each task as a
+headless `claude -p` session ([`run_eval.py`](evals/run_eval.py)) so Claude Code itself
+reports the dollars, with the skills loaded from the working tree and the same account on both
+sides. Raw receipts and work: [`cost-3/`](evals/2026-10-24/cost-3/).
+
+| Task | Side | done | evidence | report lines | plan + log | cost (USD) | wall time | turns |
+|---|---|---|---|---|---|---|---|---|
+| code | Stillwright | yes | yes | 3 | no | 0.283 | 16 s | 8 |
+| code | plain | yes | yes | 4 | no | 0.280 | 17 s | 7 |
+| writing | Stillwright | yes | yes | 6 | no | 0.265 | 12 s | 6 |
+| writing | plain | yes | yes | 9 | no | 0.257 | 21 s | 5 |
+| research | Stillwright | yes | yes | 5 | yes | 0.368 | 39 s | 11 |
+| research | plain | yes | yes | 14 | no | 0.266 | 24 s | 5 |
+
+Totals: Stillwright $0.92, plain $0.80. Every session on this account pays about
+$0.20 before any work (its plugin context is cached once per session), so the task itself is
+5–15 cents on either side. Both sides finished every task; Stillwright's reports were shorter
+and the plain side's research report ran to 14 lines. The Stillwright sessions mostly skipped
+the plan file and the cheap worker on tasks this small, so the "plan + log" column is no
+longer a given in headless runs; that is a skill-adherence gap, recorded here rather than hidden.
+
+**What this settles:** on one-sitting tasks Stillwright does not save money and I will not say
+it does. Where savings could exist (long runs: cached prefixes, cheap subagents, fewer
+retries) is untested. The tools for testing it are in [cost.md](cost.md): the A/B harness,
+`sw run cost`, and `sw cache`, which names the turns that broke the prompt cache.
+
+Two earlier priced rounds were discarded: headless sessions had been denied Bash and file
+writes by my own harness settings, so no agent could run tests; the receipts from those rounds
+measured permission failures, not work.
+
 ## Limits of this eval
 
 - Three tasks, one run each per side. Enough to see patterns, not to put error bars on them.

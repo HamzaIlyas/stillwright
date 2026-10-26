@@ -80,6 +80,8 @@ questions to get to know you. After that:
 sw status          what's going on, in a few lines
 sw inbox list      the only things that need you
 sw goal add "..."  give it more work
+sw run cost        dollars a run spent, by model
+sw cache <jsonl>   which turns of a session broke the prompt cache
 ```
 
 To keep it working while you're away, schedule one loop per hour, for example
@@ -131,6 +133,9 @@ an auditable plan and log every time, zero false claims (the plain side had one 
 about twice the wall time, and reports that broke the five-line rule every time (as did the
 plain side's). After one skill fix, a re-run met the rule in all three tasks. Numbers,
 caveats and raw runs: [docs/evals.md](docs/evals.md).
+
+Cost: measured, not assumed. On one-sitting tasks Stillwright costs about the same as a plain
+agent; the harness, the price table and the cache linter are in [docs/cost.md](docs/cost.md).
 
 Issues and PRs welcome. Found a gap? Open an [idea](https://github.com/HamzaIlyas/stillwright/issues/new?template=idea.yml).
 

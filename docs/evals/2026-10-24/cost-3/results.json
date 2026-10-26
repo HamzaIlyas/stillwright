@@ -1,0 +1,62 @@
+{
+  "code-with": {
+    "task_done": true,
+    "task_done_detail": "unittest rc=0, tests untouched=True",
+    "evidence_in_report": true,
+    "evidence_detail": "quotes test run output",
+    "report_5_lines_or_fewer": true,
+    "report_lines": 3,
+    "run_logged_with_pass": false,
+    "log_detail": "plans=0 logs=0 pass_logged=False"
+  },
+  "code-without": {
+    "task_done": true,
+    "task_done_detail": "unittest rc=0, tests untouched=True",
+    "evidence_in_report": true,
+    "evidence_detail": "quotes test run output",
+    "report_5_lines_or_fewer": true,
+    "report_lines": 4,
+    "run_logged_with_pass": false,
+    "log_detail": "plans=0 logs=0 pass_logged=False"
+  },
+  "writing-with": {
+    "task_done": true,
+    "task_done_detail": "41 words, missing facts=[]",
+    "evidence_in_report": true,
+    "evidence_detail": "states the word count",
+    "report_5_lines_or_fewer": false,
+    "report_lines": 6,
+    "run_logged_with_pass": false,
+    "log_detail": "plans=0 logs=0 pass_logged=False"
+  },
+  "writing-without": {
+    "task_done": true,
+    "task_done_detail": "50 words, missing facts=[]",
+    "evidence_in_report": true,
+    "evidence_detail": "states the word count",
+    "report_5_lines_or_fewer": false,
+    "report_lines": 9,
+    "run_logged_with_pass": false,
+    "log_detail": "plans=0 logs=0 pass_logged=False"
+  },
+  "research-with": {
+    "task_done": true,
+    "task_done_detail": "has version=True, date=True, pypi url=True, github url=True",
+    "evidence_in_report": true,
+    "evidence_detail": "at least two URLs",
+    "report_5_lines_or_fewer": true,
+    "report_lines": 5,
+    "run_logged_with_pass": true,
+    "log_detail": "plans=1 logs=1 pass_logged=True"
+  },
+  "research-without": {
+    "task_done": true,
+    "task_done_detail": "has version=True, date=True, pypi url=True, github url=True",
+    "evidence_in_report": true,
+    "evidence_detail": "at least two URLs",
+    "report_5_lines_or_fewer": false,
+    "report_lines": 14,
+    "run_logged_with_pass": false,
+    "log_detail": "plans=0 logs=0 pass_logged=False"
+  }
+}

@@ -306,5 +306,92 @@ class InitTests(SwTestCase):
         self.assertEqual(data["a"], 1)
         self.assertIn("stillwright@stillwright", data["enabledPlugins"])
 
+class CostTests(SwTestCase):
+    def test_cost_sums_by_model_at_prices(self):
+        (self.home / "prices.json").write_text(json.dumps({"small": {"in": 1.0, "out": 5.0}, "big": {"in": 3.0, "out": 15.0}}))
+        self.sw("run", "new", "x")
+        self.sw("run", "log", "latest", "step=1", "model=small", "in=1000000", "out=100000", "result=pass")
+        self.sw("run", "log", "latest", "step=2", "model=big", "in=500000", "out=100000", "result=pass")
+        self.sw("run", "log", "latest", "step=3", "model=small", "in=1000000", "out=0", "result=pass")
+        out = self.sw("run", "cost")
+        self.assertIn("small: in 2000000, out 100000, $2.5000", out)
+        self.assertIn("big: in 500000, out 100000, $3.0000", out)
+        self.assertIn("total: $5.5000", out)
+
+    def test_cost_prices_dated_model_ids(self):
+        (self.home / "prices.json").write_text(json.dumps({"claude-haiku-4-5": {"in": 1.0, "out": 5.0}}))
+        self.sw("run", "new", "x")
+        self.sw("run", "log", "latest", "step=1", "model=claude-haiku-4-5-20251001", "in=1000000", "out=0", "result=pass")
+        self.assertIn("total: $1.0000", self.sw("run", "cost"))
+
+    def test_cache_handles_odd_timestamps(self):
+        p = self.home / "odd.jsonl"
+        rows = []
+        for i, created in enumerate((40000, 900, 40000)):
+            rows.append(json.dumps({"type": "assistant", "timestamp": "2026-10-26T10:00:0" + "é" * 20,
+                                    "message": {"id": f"m{i}", "model": "m", "usage": {"input_tokens": 2, "cache_creation_input_tokens": created, "cache_read_input_tokens": 40000 if i else 0, "output_tokens": 1}}}))
+        p.write_text("\n".join(rows) + "\n")
+        self.assertIn("3 turns", self.sw("cache", str(p)))
+
+    def test_cost_fails_on_unpriced_model_and_handles_no_usage(self):
+        self.sw("run", "new", "x")
+        self.assertIn("no token usage logged", self.sw("run", "cost"))
+        self.sw("run", "log", "latest", "step=1", "model=mystery", "in=10", "out=10")
+        with self.assertRaises(Failed):
+            self.sw("run", "cost")
+
+
+class CacheTests(SwTestCase):
+    def transcript(self, turns):
+        lines = []
+        for i, (model, inp, created, read, out) in enumerate(turns):
+            msg = {"type": "assistant", "timestamp": f"2026-10-26T10:00:{i:02d}.000Z",
+                   "message": {"id": f"m{i}", "model": model,
+                               "usage": {"input_tokens": inp, "cache_creation_input_tokens": created,
+                                         "cache_read_input_tokens": read, "output_tokens": out}}}
+            lines.append(json.dumps(msg))
+            lines.append(json.dumps(msg))  # duplicate block, must be counted once
+        p = self.home / "session.jsonl"
+        p.write_text("\n".join(lines) + "\n")
+        return p
+
+    def test_reports_model_switch_and_prefix_break(self):
+        (self.home / "prices.json").write_text(json.dumps({"claude-sonnet-5-5": {"in": 2.0, "out": 10.0}}))
+        p = self.transcript([
+            ("claude-sonnet-5-5", 2, 40000, 0, 100),
+            ("claude-sonnet-5-5", 2, 1000, 40000, 100),
+            ("claude-opus-5-5", 2, 41000, 0, 100),
+            ("claude-opus-5-5", 2, 500, 41000, 100),
+            ("claude-opus-5-5", 2, 30000, 12000, 100),
+        ])
+        out = self.sw("cache", str(p))
+        self.assertIn("5 turns", out)
+        self.assertIn("model switched claude-sonnet-5-5 -> claude-opus-5-5", out)
+        self.assertIn("prefix changed", out)
+        self.assertIn("2 cache break(s)", out)
+        self.assertIn("at most about $", out)
+
+    def test_names_expired_cache_after_long_pause(self):
+        p = self.transcript([("m", 2, 40000, 0, 50), ("m", 2, 800, 40000, 50)])
+        late = {"type": "assistant", "timestamp": "2026-10-26T13:00:05.000Z",
+                "message": {"id": "m9", "model": "m",
+                            "usage": {"input_tokens": 2, "cache_creation_input_tokens": 40000,
+                                      "cache_read_input_tokens": 0, "output_tokens": 50}}}
+        p.write_text(p.read_text() + json.dumps(late) + "\n")
+        out = self.sw("cache", str(p))
+        self.assertIn("cache expired during a 180-minute pause", out)
+
+    def test_clean_session_has_no_breaks(self):
+        p = self.transcript([("m", 2, 40000, 0, 50), ("m", 2, 800, 40000, 50), ("m", 2, 900, 40800, 50)])
+        out = self.sw("cache", str(p))
+        self.assertIn("no cache breaks found", out)
+
+    def test_rejects_file_without_usage(self):
+        p = self.home / "x.jsonl"
+        p.write_text('{"type":"user","message":{"content":"hi"}}\n')
+        with self.assertRaises(Failed):
+            self.sw("cache", str(p))
+
+
 if __name__ == "__main__":
     unittest.main()
