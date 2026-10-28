@@ -437,6 +437,7 @@ class CertificateTests(SwTestCase):
         self.assertEqual(self.receipts()[-1]["result"], "fail")
         self.assertIn("step 1: fail", self.sw("run", "status"))
 
+    @unittest.skipIf(os.name == "nt", "no pipefail on Windows (cmd /C)")
     def test_a_failure_inside_a_pipe_fails_the_check(self):
         (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $ false | cat\n")
         with self.assertRaises(Failed):
@@ -477,13 +478,15 @@ class CertificateTests(SwTestCase):
     def test_frozen_check_files_detect_tampering(self):
         self.sw("run", "freeze", "latest", "tests", cwd=self.work)
         frozen = os.path.realpath(self.work / "tests")
-        self.assertEqual(list(self.events()[-1]["files"]), [frozen])
+        stored = list(self.events()[-1]["files"])
+        # Windows may report the 8.3 short form of the temp folder; compare real paths.
+        self.assertEqual([os.path.realpath(p) for p in stored], [frozen])
         self.sw("run", "check", "latest", "1", cwd=self.work)
         (self.work / "tests" / "t.sh").write_text("exit 0 # weakened\n")
         with self.assertRaises(Failed) as cm:
             self.sw("run", "check", "latest", "1", cwd=self.work)
         self.assertIn("tamper", str(cm.exception))
-        self.assertEqual(self.receipts()[-1]["tampered"], [frozen])
+        self.assertEqual([os.path.realpath(p) for p in self.receipts()[-1]["tampered"]], [frozen])
         self.assertEqual(self.receipts()[-1]["result"], "fail")
         with self.assertRaises(Failed):
             self.sw("run", "done", "latest", "1", cwd=self.work)
@@ -585,7 +588,7 @@ class CertificateTests(SwTestCase):
 
     def test_done_must_run_where_the_check_ran(self):
         self.sw("run", "check", "latest", "1", cwd=self.work)
-        self.assertEqual(self.receipts()[-1]["cwd"], str(self.work.resolve()))
+        self.assertEqual(os.path.realpath(self.receipts()[-1]["cwd"]), os.path.realpath(self.work))
         sub = self.work / "sub"
         sub.mkdir()
         with self.assertRaises(Failed) as cm:
