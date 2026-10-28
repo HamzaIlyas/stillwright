@@ -702,7 +702,17 @@ fn take_snapshot(top: &str, run: &Path, label: &str, message: &str) -> Result<St
     if git(Some(top), &[], &["rev-parse", "--verify", "-q", "HEAD"]).is_some() {
         args.extend(["-p", "HEAD"]);
     }
-    let commit = git(Some(top), &[], &args).ok_or("git commit-tree failed")?;
+    // Snapshots have their own identity, so a machine without user.name/email still works.
+    let who = Path::new("stillwright");
+    let mail = Path::new("sw@stillwright.local");
+    let identity = [
+        ("GIT_AUTHOR_NAME", who),
+        ("GIT_AUTHOR_EMAIL", mail),
+        ("GIT_COMMITTER_NAME", who),
+        ("GIT_COMMITTER_EMAIL", mail),
+    ];
+    let commit = git(Some(top), &identity, &args)
+        .ok_or("git commit-tree failed (is git older than 2.13, or the repository read-only?)")?;
     let reference = snapshot_ref(run, label);
     git(Some(top), &[], &["update-ref", &reference, &commit])
         .ok_or_else(|| format!("cannot write {reference}"))?;
@@ -711,6 +721,23 @@ fn take_snapshot(top: &str, run: &Path, label: &str, message: &str) -> Result<St
 
 fn snapshot_ref(run: &Path, label: &str) -> String {
     format!("refs/sw/{}/{label}", file_name(run))
+}
+
+/// `base`, or `base-2`, `base-3`… if that ref already exists: a snapshot never overwrites one.
+fn free_label(top: &str, run: &Path, base: &str) -> String {
+    let mut label = base.to_string();
+    let mut n = 1;
+    while git(
+        Some(top),
+        &[],
+        &["rev-parse", "--verify", "-q", &snapshot_ref(run, &label)],
+    )
+    .is_some()
+    {
+        n += 1;
+        label = format!("{base}-{n}");
+    }
+    label
 }
 
 fn run_snapshot(run: &Path, step: &str) -> Result<()> {
@@ -744,7 +771,11 @@ fn run_rewind(run: &Path, step: &str) -> Result<()> {
         git(Some(&top), &[], &["rev-parse", "--verify", "-q", &target]).ok_or_else(|| {
             format!("step {step}: no snapshot; `sw run done` and `sw run snapshot` take them")
         })?;
-    let kept_label = format!("before-rewind-{}", now().replace([':', 'T'], ""));
+    let kept_label = free_label(
+        &top,
+        run,
+        &format!("before-rewind-{}", now().replace([':', 'T'], "")),
+    );
     let kept = take_snapshot(
         &top,
         run,
@@ -759,16 +790,36 @@ fn run_rewind(run: &Path, step: &str) -> Result<()> {
             git(
                 Some(&top),
                 &envs,
-                &["ls-files", "--others", "--exclude-standard"],
+                &["ls-files", "-z", "--others", "--exclude-standard"],
             )
         });
     let _ = fs::remove_file(&index);
     let extra = restored.ok_or("git could not restore the snapshot")?;
+    // Never remove the state folder when it lives inside the repository: it is not in the
+    // snapshot, by design.
+    let top_path = Path::new(&top);
+    let state = state_root()
+        .ok()
+        .and_then(|s| fs::canonicalize(s).ok())
+        .filter(|s| fs::canonicalize(top_path).is_ok_and(|t| s.starts_with(t)));
     let mut removed = 0;
-    for rel in extra.lines().filter(|l| !l.is_empty()) {
-        let path = Path::new(&top).join(rel);
-        if fs::remove_file(&path).is_ok() {
-            removed += 1;
+    for rel in extra.split('\0').filter(|l| !l.is_empty()) {
+        let path = top_path.join(rel);
+        let in_state = match (&state, fs::canonicalize(&path)) {
+            (Some(state), Ok(real)) => real.starts_with(state),
+            _ => false,
+        };
+        if in_state || fs::remove_file(&path).is_err() {
+            continue;
+        }
+        removed += 1;
+        // Directories emptied by that removal go too, up to the repository root.
+        let mut dir = path.parent();
+        while let Some(d) = dir {
+            if d == top_path || fs::remove_dir(d).is_err() {
+                break;
+            }
+            dir = d.parent();
         }
     }
     let mut event = serde_json::Map::new();
@@ -851,9 +902,22 @@ fn frozen_files(run: &Path) -> Result<BTreeMap<String, String>> {
 fn tampered_paths(run: &Path) -> Result<Vec<String>> {
     Ok(frozen_files(run)?
         .iter()
-        .filter(|(path, hash)| content_hash(Path::new(path)).ok().as_deref() != Some(hash))
+        .filter(|(path, hash)| frozen_hash(Path::new(path)).ok().as_deref() != Some(hash))
         .map(|(path, _)| path.clone())
         .collect())
+}
+
+/// Hash of a frozen path's content; a symlink also hashes where it points, so retargeting
+/// it shows up as tampering.
+fn frozen_hash(path: &Path) -> Result<String> {
+    let content = content_hash(path)?;
+    match fs::read_link(path) {
+        Ok(target) => Ok(format!(
+            "{:x}",
+            Sha256::digest(format!("{content} -> {}", target.to_string_lossy()))
+        )),
+        Err(_) => Ok(content),
+    }
 }
 
 fn latest_receipt(
@@ -884,6 +948,7 @@ fn run_check(run: &Path, step: &str) -> Result<()> {
     event.insert("event".into(), "receipt".into());
     event.insert("step".into(), step.into());
     event.insert("cmd".into(), cmd.clone().into());
+    event.insert("cwd".into(), current_dir()?.into());
     let tampered = tampered_paths(run)?;
     if !tampered.is_empty() {
         let list = tampered.join(", ");
@@ -942,6 +1007,12 @@ fn run_check(run: &Path, step: &str) -> Result<()> {
     }
 }
 
+fn current_dir() -> Result<String> {
+    std::env::current_dir()
+        .map(|d| d.to_string_lossy().into_owned())
+        .map_err(|e| format!("cannot read the current directory: {e}"))
+}
+
 fn short(hash: &str) -> &str {
     if hash.len() > 12 {
         &hash[..12]
@@ -965,6 +1036,18 @@ fn run_done(run: &Path, step: &str) -> Result<()> {
             "step {step}: tampered: {} changed after the check; freeze again and run `sw run check`",
             tampered.join(", ")
         ));
+    }
+    let here = current_dir()?;
+    let there = receipt.get("cwd").map(value_str).unwrap_or_default();
+    if there != here {
+        return Err(format!(
+            "step {step}: the check ran in another directory ({there}); run `sw run done` from there, or check again here"
+        ));
+    }
+    if git_top().is_none() {
+        eprintln!(
+            "warning: no git repository here, so the receipt is not tied to the files; anything may have changed since the check"
+        );
     }
     let ran = receipt.get("cmd").map(value_str).unwrap_or_default();
     if ran != cmd {
@@ -1011,9 +1094,10 @@ fn run_done(run: &Path, step: &str) -> Result<()> {
 fn run_freeze(run: &Path, paths: &[String]) -> Result<()> {
     let mut files = serde_json::Map::new();
     for path in paths {
-        // Absolute, so the check compares the same files from any directory.
-        let full = fs::canonicalize(path).map_err(|e| format!("cannot freeze {path}: {e}"))?;
-        let hash = content_hash(&full).map_err(|e| format!("cannot freeze {path}: {e}"))?;
+        // Absolute, so the check compares the same files from any directory; not resolved,
+        // so a frozen symlink stays the link itself and retargeting it is caught.
+        let full = std::path::absolute(path).map_err(|e| format!("cannot freeze {path}: {e}"))?;
+        let hash = frozen_hash(&full).map_err(|e| format!("cannot freeze {path}: {e}"))?;
         files.insert(full.to_string_lossy().into_owned(), hash.into());
     }
     let mut event = serde_json::Map::new();

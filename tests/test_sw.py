@@ -569,6 +569,29 @@ class CertificateTests(SwTestCase):
         self.sw("run", "check", "latest", "1", cwd=self.work)
         self.assertEqual(objects(), before)
 
+    @unittest.skipIf(os.name == "nt", "symlinks")
+    def test_retargeting_a_frozen_symlink_is_tampering(self):
+        (self.work / "real.sh").write_text("exit 0\n")
+        (self.work / "weak.sh").write_text("exit 0 # weak\n")
+        (self.work / "link.sh").symlink_to("real.sh")
+        (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $ sh link.sh\n")
+        self.sw("run", "freeze", "latest", "link.sh", cwd=self.work)
+        self.assertEqual(list(self.events()[-1]["files"]), [str(self.work.resolve() / "link.sh")])
+        (self.work / "link.sh").unlink()
+        (self.work / "link.sh").symlink_to("weak.sh")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("tamper", str(cm.exception))
+
+    def test_done_must_run_where_the_check_ran(self):
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertEqual(self.receipts()[-1]["cwd"], str(self.work.resolve()))
+        sub = self.work / "sub"
+        sub.mkdir()
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=sub)
+        self.assertIn("directory", str(cm.exception))
+
     def test_check_outside_git_still_works(self):
         plain = pathlib.Path(self.tmp.name) / "plain"
         plain.mkdir()
@@ -654,6 +677,42 @@ class RewindTests(SwTestCase):
         (self.work / "a.txt").write_text("broken\n")
         self.sw("run", "rewind", "latest", "2", cwd=self.work)
         self.assertEqual((self.work / "a.txt").read_text(), "v1b\n")
+
+    def test_rewind_keeps_the_state_folder_inside_the_repo(self):
+        self.env["STILLWRIGHT_HOME"] = str(self.work / ".swh")
+        run = pathlib.Path(self.sw("run", "new", "inside").strip())
+        (run / "plan.md").write_text("# Goal: x\n1. a | check: $ true\n")
+        self.certify("1")
+        (self.work / "junk.txt").write_text("x\n")
+        self.sw("run", "rewind", "latest", "1", cwd=self.work)
+        self.assertTrue((run / "plan.md").exists())
+        self.assertFalse((self.work / "junk.txt").exists())
+        self.assertIn('"rewind"', (run / "log.jsonl").read_text())
+
+    def test_two_rewinds_in_a_row_keep_both_states(self):
+        self.certify("1")
+        (self.work / "precious.txt").write_text("keep me\n")
+        self.sw("run", "rewind", "latest", "1", cwd=self.work)
+        self.sw("run", "rewind", "latest", "1", cwd=self.work)
+        kept = [r for r in self.refs() if "before-rewind" in r]
+        self.assertEqual(len(kept), 2)
+        self.assertTrue(any("precious.txt" in self.tree_files(r) for r in kept))
+
+    def test_rewind_removes_files_with_non_ascii_names(self):
+        self.certify("1")
+        (self.work / "späce ü.txt").write_text("x\n")
+        (self.work / "deep" / "er").mkdir(parents=True)
+        (self.work / "deep" / "er" / "n.txt").write_text("x\n")
+        self.sw("run", "rewind", "latest", "1", cwd=self.work)
+        self.assertFalse((self.work / "späce ü.txt").exists())
+        self.assertFalse((self.work / "deep").exists(), "emptied directories are removed too")
+
+    def test_done_works_without_a_git_identity(self):
+        self.env["GIT_CONFIG_GLOBAL"] = os.devnull
+        self.env["GIT_CONFIG_SYSTEM"] = os.devnull
+        for key in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+            self.env.pop(key, None)
+        self.assertIn("certified", self.certify("1"))
 
     def test_snapshot_outside_git_is_refused_but_done_still_works(self):
         plain = pathlib.Path(self.tmp.name) / "plain"
