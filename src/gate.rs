@@ -735,7 +735,11 @@ fn base_name(word: &str) -> String {
 
 fn is_dangerous_root(raw: &str, resolved: &str) -> bool {
     let raw = raw.trim_end_matches('/');
-    if raw.is_empty()
+    // `/` or `/usr` named as such is a root folder on every OS, even where `/` is not an
+    // absolute path (Windows).
+    let names_a_root = raw.starts_with('/') && raw.matches('/').count() == 1;
+    if names_a_root
+        || raw.is_empty()
         || raw == "~"
         || raw == "$HOME"
         || raw == "${HOME}"
@@ -769,6 +773,14 @@ fn expand(raw: &str, cwd: &Path) -> PathBuf {
         .or_else(|| raw.strip_prefix("$HOME"))
     {
         PathBuf::from(&home).join(rest.trim_start_matches('/'))
+    } else if cfg!(windows) && (raw.starts_with('/') || raw.starts_with('\\')) {
+        // A rooted path without a drive: on Windows, the drive is the current one.
+        let drive = cwd
+            .components()
+            .next()
+            .map(|c| c.as_os_str().to_os_string())
+            .unwrap_or_default();
+        PathBuf::from(drive).join(raw.trim_start_matches(['/', '\\']))
     } else {
         PathBuf::from(raw)
     };

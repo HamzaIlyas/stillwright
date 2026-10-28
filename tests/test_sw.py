@@ -889,7 +889,7 @@ class HookTests(SwTestCase):
 
     def test_malformed_hook_input_fails_open_with_a_warning(self):
         for bad in ("", "null", "{", "﻿{}"):
-            result = subprocess.run([SW, "gate", "--hook"], env=self.env, input=bad, capture_output=True, text=True, cwd=self.work)
+            result = subprocess.run([SW, "gate", "--hook"], env=self.env, input=bad, capture_output=True, text=True, encoding="utf-8", cwd=self.work)
             self.assertEqual(result.returncode, 0, bad)
             self.assertEqual(result.stdout, "")
             self.assertIn("warning", result.stderr)
