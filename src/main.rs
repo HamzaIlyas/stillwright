@@ -11,7 +11,8 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
+use std::time::Instant;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::de::DeserializeOwned;
@@ -218,6 +219,36 @@ enum RunCmd {
         #[arg(default_value = "latest")]
         run: String,
     },
+    /// Run a step's `$ <command>` check here and write a receipt (exit code, output hash,
+    /// working-tree hash) to the run's log. A receipt is evidence; `sw run done` is the claim.
+    Check {
+        run: String,
+        step: String,
+    },
+    /// Mark a step done. Needs a passing receipt taken on the working tree as it is now.
+    Done {
+        run: String,
+        step: String,
+    },
+    /// Record the hashes of the files a step's checks depend on (tests, scripts). Any change
+    /// afterwards fails the check as tampering until they are frozen again.
+    Freeze {
+        run: String,
+        #[arg(required = true)]
+        paths: Vec<String>,
+    },
+    /// Save the working tree (untracked files included) as a git snapshot for a step, before
+    /// starting it. `sw run done` takes one on its own.
+    Snapshot {
+        run: String,
+        step: String,
+    },
+    /// Put the working tree back as it was in a step's snapshot. The state being replaced is
+    /// saved first, so a rewind can itself be undone.
+    Rewind {
+        run: String,
+        step: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -290,12 +321,17 @@ struct Store {
     root: PathBuf,
 }
 
+/// The state folder: `$STILLWRIGHT_HOME`, else `~/.stillwright`.
+fn state_root() -> Result<PathBuf> {
+    match std::env::var_os("STILLWRIGHT_HOME").filter(|v| !v.is_empty()) {
+        Some(v) => Ok(PathBuf::from(v)),
+        None => Ok(home_dir()?.join(".stillwright")),
+    }
+}
+
 impl Store {
     fn open() -> Result<Self> {
-        let root = match std::env::var_os("STILLWRIGHT_HOME").filter(|v| !v.is_empty()) {
-            Some(v) => PathBuf::from(v),
-            None => home_dir()?.join(".stillwright"),
-        };
+        let root = state_root()?;
         fs::create_dir_all(root.join("runs"))
             .map_err(|e| format!("cannot create {}: {e}", root.display()))?;
         Ok(Store { root })
@@ -506,16 +542,573 @@ impl Progress {
 
 fn append_event(run: &Path, pairs: &[(String, String)]) -> Result<()> {
     let mut event = serde_json::Map::new();
-    event.insert("ts".into(), now().into());
     for (k, v) in pairs {
         event.insert(k.clone(), v.clone().into());
     }
+    append_json(run, event)
+}
+
+fn append_json(run: &Path, mut event: serde_json::Map<String, serde_json::Value>) -> Result<()> {
+    event.insert("ts".into(), now().into());
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(run.join("log.jsonl"))
         .map_err(|e| format!("cannot open run log: {e}"))?;
     writeln!(file, "{}", serde_json::Value::Object(event)).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------- certificates
+//
+// A step whose check is written `check: $ <command>` is proven, not claimed: `sw run check`
+// runs the command and writes a receipt (command, exit code, output hash, hash of the working
+// tree, which frozen files were touched); `sw run done` accepts the step only if the latest
+// receipt passed and the working tree is still the one it was taken on. A pass logged by
+// hand for such a step is refused. Check files frozen with `sw run freeze` fail the check as
+// tampered when they change, so weakening a test leaves a mark in the log.
+
+/// The check text of one step in plan.md, if that step exists. A `$` command keeps its pipes:
+/// it runs to the end of the line, minus a trailing `| after: …` field.
+fn plan_step_check(plan: &str, step: &str) -> Option<String> {
+    plan.lines().find_map(|line| {
+        let digits: String = line.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let rest = &line[digits.len()..];
+        if digits != step || !rest.starts_with('.') {
+            return None;
+        }
+        let mut offset = 0;
+        for part in rest.split('|') {
+            if let Some(check) = part.trim_start().strip_prefix("check:") {
+                let check = check.trim();
+                if !check.starts_with('$') {
+                    return Some(check.to_string());
+                }
+                let whole = rest[offset + (part.len() - part.trim_start().len())..].trim();
+                let whole = whole.strip_prefix("check:").unwrap_or(whole).trim();
+                // Trailing plan fields end the command; so a command cannot contain them.
+                let end = ["| after:", "| who:"]
+                    .iter()
+                    .filter_map(|field| whole.find(field))
+                    .min();
+                let whole = match end {
+                    Some(i) => whole[..i].trim(),
+                    None => whole,
+                };
+                return Some(whole.to_string());
+            }
+            offset += part.len() + 1;
+        }
+        None
+    })
+}
+
+/// A check sw can run itself: `$ <command>` (the space matters: `$5 refund shown` is prose).
+fn command_check(check: &str) -> Option<&str> {
+    check
+        .strip_prefix("$ ")
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+}
+
+/// Top folder of the git repository the current directory is in.
+fn git_top() -> Option<String> {
+    git(None, &[], &["rev-parse", "--show-toplevel"])
+}
+
+/// Run git in `dir` with extra environment; stdout on success, None otherwise.
+fn git(dir: Option<&str>, envs: &[(&str, &Path)], args: &[&str]) -> Option<String> {
+    let mut cmd = Command::new("git");
+    cmd.args(args);
+    if let Some(dir) = dir {
+        cmd.current_dir(dir);
+    }
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    match cmd.output() {
+        Ok(out) if out.status.success() => {
+            Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        }
+        _ => None,
+    }
+}
+
+/// A fresh path under the temp folder for a throw-away index or object store.
+fn temp_git_path(kind: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "sw-{kind}-{}-{}",
+        std::process::id(),
+        now().replace([':', 'T', '-'], "")
+    ));
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_dir_all(&path);
+    path
+}
+
+/// Tree object of the working tree as git would commit it: untracked files included, ignored
+/// files and the Stillwright state folder left out. The user's index is never touched. With
+/// `keep_objects` false the objects go to a temp store that is deleted afterwards, so hashing
+/// leaves nothing in the repository; a snapshot keeps them.
+fn tree_of_worktree(top: &str, keep_objects: bool) -> Result<String> {
+    let index = temp_git_path("index");
+    let objects = temp_git_path("objects");
+    let mut envs: Vec<(&str, &Path)> = vec![("GIT_INDEX_FILE", &index)];
+    let alternate;
+    if !keep_objects {
+        let git_dir = git(Some(top), &[], &["rev-parse", "--absolute-git-dir"])
+            .ok_or_else(|| format!("git cannot read the repository at {top}"))?;
+        alternate = PathBuf::from(git_dir).join("objects");
+        fs::create_dir_all(&objects).map_err(|e| format!("cannot create a temp store: {e}"))?;
+        envs.push(("GIT_OBJECT_DIRECTORY", &objects));
+        envs.push(("GIT_ALTERNATE_OBJECT_DIRECTORIES", &alternate));
+    }
+    let mut add = vec!["add", "-A", "--", "."];
+    let exclude;
+    if let Ok(state) = state_root().and_then(|s| fs::canonicalize(s).map_err(|e| e.to_string())) {
+        if let Ok(top_real) = fs::canonicalize(top) {
+            if let Ok(rel) = state.strip_prefix(&top_real) {
+                exclude = format!(":(exclude){}", rel.to_string_lossy().replace('\\', "/"));
+                add.push(&exclude);
+            }
+        }
+    }
+    let tree = git(Some(top), &envs, &add)
+        .ok_or_else(|| {
+            format!(
+                "git could not read the working tree at {top} (`git add -A` failed: an unreadable file, permissions, or safe.directory?)"
+            )
+        })
+        .and_then(|_| {
+            git(Some(top), &envs, &["write-tree"]).ok_or_else(|| "git write-tree failed".to_string())
+        });
+    let _ = fs::remove_file(&index);
+    let _ = fs::remove_dir_all(&objects);
+    tree
+}
+
+/// Hash of the working tree; "none" outside a repository, an error when git fails inside one.
+fn worktree_hash() -> Result<String> {
+    match git_top() {
+        Some(top) => tree_of_worktree(&top, false),
+        None => Ok("none".into()),
+    }
+}
+
+/// Commit the working tree as a snapshot under `refs/sw/<run>/<label>`; the user's branch,
+/// index and HEAD are untouched. Returns the commit hash.
+fn take_snapshot(top: &str, run: &Path, label: &str, message: &str) -> Result<String> {
+    let tree = tree_of_worktree(top, true)?;
+    let mut args = vec!["commit-tree", tree.as_str(), "-m", message];
+    if git(Some(top), &[], &["rev-parse", "--verify", "-q", "HEAD"]).is_some() {
+        args.extend(["-p", "HEAD"]);
+    }
+    // Snapshots have their own identity, so a machine without user.name/email still works.
+    let who = Path::new("stillwright");
+    let mail = Path::new("sw@stillwright.local");
+    let identity = [
+        ("GIT_AUTHOR_NAME", who),
+        ("GIT_AUTHOR_EMAIL", mail),
+        ("GIT_COMMITTER_NAME", who),
+        ("GIT_COMMITTER_EMAIL", mail),
+    ];
+    let commit = git(Some(top), &identity, &args)
+        .ok_or("git commit-tree failed (is git older than 2.13, or the repository read-only?)")?;
+    let reference = snapshot_ref(run, label);
+    git(Some(top), &[], &["update-ref", &reference, &commit])
+        .ok_or_else(|| format!("cannot write {reference}"))?;
+    Ok(commit)
+}
+
+fn snapshot_ref(run: &Path, label: &str) -> String {
+    format!("refs/sw/{}/{label}", file_name(run))
+}
+
+/// `base`, or `base-2`, `base-3`… if that ref already exists: a snapshot never overwrites one.
+fn free_label(top: &str, run: &Path, base: &str) -> String {
+    let mut label = base.to_string();
+    let mut n = 1;
+    while git(
+        Some(top),
+        &[],
+        &["rev-parse", "--verify", "-q", &snapshot_ref(run, &label)],
+    )
+    .is_some()
+    {
+        n += 1;
+        label = format!("{base}-{n}");
+    }
+    label
+}
+
+fn run_snapshot(run: &Path, step: &str) -> Result<()> {
+    let top = git_top().ok_or("a snapshot needs a git repository here")?;
+    let label = format!("step-{step}");
+    let commit = take_snapshot(
+        &top,
+        run,
+        &label,
+        &format!("sw snapshot before step {step}"),
+    )?;
+    let mut event = serde_json::Map::new();
+    event.insert("event".into(), "snapshot".into());
+    event.insert("step".into(), step.into());
+    event.insert("commit".into(), commit.clone().into());
+    append_json(run, event)?;
+    println!(
+        "step {step}: snapshot {} saved at {}",
+        short(&commit),
+        snapshot_ref(run, &label)
+    );
+    Ok(())
+}
+
+/// Restore the files of a step's snapshot. Files that exist now but not in the snapshot are
+/// removed unless git ignores them; the state being replaced is snapshotted first.
+fn run_rewind(run: &Path, step: &str) -> Result<()> {
+    let top = git_top().ok_or("a rewind needs a git repository here")?;
+    let target = snapshot_ref(run, &format!("step-{step}"));
+    let commit =
+        git(Some(&top), &[], &["rev-parse", "--verify", "-q", &target]).ok_or_else(|| {
+            format!("step {step}: no snapshot; `sw run done` and `sw run snapshot` take them")
+        })?;
+    let kept_label = free_label(
+        &top,
+        run,
+        &format!("before-rewind-{}", now().replace([':', 'T'], "")),
+    );
+    let kept = take_snapshot(
+        &top,
+        run,
+        &kept_label,
+        &format!("sw state before rewinding to step {step}"),
+    )?;
+    let index = temp_git_path("index");
+    let envs: [(&str, &Path); 1] = [("GIT_INDEX_FILE", &index)];
+    let restored = git(Some(&top), &envs, &["read-tree", &commit])
+        .and_then(|_| git(Some(&top), &envs, &["checkout-index", "-a", "-f"]))
+        .and_then(|_| {
+            git(
+                Some(&top),
+                &envs,
+                &["ls-files", "-z", "--others", "--exclude-standard"],
+            )
+        });
+    let _ = fs::remove_file(&index);
+    let extra = restored.ok_or("git could not restore the snapshot")?;
+    // Never remove the state folder when it lives inside the repository: it is not in the
+    // snapshot, by design.
+    let top_path = Path::new(&top);
+    let state = state_root()
+        .ok()
+        .and_then(|s| fs::canonicalize(s).ok())
+        .filter(|s| fs::canonicalize(top_path).is_ok_and(|t| s.starts_with(t)));
+    let mut removed = 0;
+    for rel in extra.split('\0').filter(|l| !l.is_empty()) {
+        let path = top_path.join(rel);
+        let in_state = match (&state, fs::canonicalize(&path)) {
+            (Some(state), Ok(real)) => real.starts_with(state),
+            _ => false,
+        };
+        if in_state || fs::remove_file(&path).is_err() {
+            continue;
+        }
+        removed += 1;
+        // Directories emptied by that removal go too, up to the repository root.
+        let mut dir = path.parent();
+        while let Some(d) = dir {
+            if d == top_path || fs::remove_dir(d).is_err() {
+                break;
+            }
+            dir = d.parent();
+        }
+    }
+    let mut event = serde_json::Map::new();
+    event.insert("event".into(), "rewind".into());
+    event.insert("step".into(), step.into());
+    event.insert("commit".into(), commit.clone().into());
+    event.insert("kept".into(), kept.clone().into());
+    event.insert("removed".into(), removed.into());
+    append_json(run, event)?;
+    println!(
+        "step {step}: files restored from snapshot {} ({removed} newer files removed); the state before is kept at {}",
+        short(&commit),
+        snapshot_ref(run, &kept_label)
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+fn shell(cmd: &str) -> Result<std::process::Output> {
+    use std::os::windows::process::CommandExt;
+    // raw_arg: cmd.exe has its own quoting, which the default escaping would break.
+    // No pipefail on Windows: a failure inside a pipe is not caught there.
+    Command::new("cmd")
+        .raw_arg(format!("/C {cmd}"))
+        .output()
+        .map_err(|e| format!("cannot run the check: {e}"))
+}
+
+#[cfg(not(windows))]
+fn shell(cmd: &str) -> Result<std::process::Output> {
+    // bash for pipefail (a failing command inside a pipe must fail the check); sh if absent,
+    // and then a pipe only reports its last command.
+    let result = match Command::new("bash")
+        .args(["-o", "pipefail", "-c", cmd])
+        .output()
+    {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Command::new("sh").args(["-c", cmd]).output()
+        }
+        other => other,
+    };
+    result.map_err(|e| format!("cannot run the check: {e}"))
+}
+
+/// Every event in the run's log. A missing log is empty; an unreadable one is an error, so a
+/// freeze can never be skipped by making the log unreadable.
+fn log_events(run: &Path) -> Result<Vec<serde_json::Map<String, serde_json::Value>>> {
+    let text = match fs::read_to_string(run.join("log.jsonl")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("cannot read {}/log.jsonl: {e}", file_name(run))),
+    };
+    Ok(text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect())
+}
+
+fn event_is(event: &serde_json::Map<String, serde_json::Value>, key: &str, value: &str) -> bool {
+    event.get(key).map(value_str).as_deref() == Some(value)
+}
+
+/// Frozen paths (absolute) and their hashes; a later freeze of a path replaces the earlier one.
+fn frozen_files(run: &Path) -> Result<BTreeMap<String, String>> {
+    let mut files = BTreeMap::new();
+    for event in log_events(run)? {
+        if !event_is(&event, "event", "freeze") {
+            continue;
+        }
+        if let Some(serde_json::Value::Object(map)) = event.get("files") {
+            for (path, hash) in map {
+                files.insert(path.clone(), value_str(hash));
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// Frozen paths whose content differs from the hash taken at freeze time (or that are gone).
+fn tampered_paths(run: &Path) -> Result<Vec<String>> {
+    Ok(frozen_files(run)?
+        .iter()
+        .filter(|(path, hash)| frozen_hash(Path::new(path)).ok().as_deref() != Some(hash))
+        .map(|(path, _)| path.clone())
+        .collect())
+}
+
+/// Hash of a frozen path's content; a symlink also hashes where it points, so retargeting
+/// it shows up as tampering.
+fn frozen_hash(path: &Path) -> Result<String> {
+    let content = content_hash(path)?;
+    match fs::read_link(path) {
+        Ok(target) => Ok(format!(
+            "{:x}",
+            Sha256::digest(format!("{content} -> {}", target.to_string_lossy()))
+        )),
+        Err(_) => Ok(content),
+    }
+}
+
+fn latest_receipt(
+    run: &Path,
+    step: &str,
+) -> Result<Option<serde_json::Map<String, serde_json::Value>>> {
+    Ok(log_events(run)?
+        .into_iter()
+        .rev()
+        .find(|e| event_is(e, "event", "receipt") && event_is(e, "step", step)))
+}
+
+fn step_command(run: &Path, step: &str) -> Result<String> {
+    let plan = fs::read_to_string(run.join("plan.md"))
+        .map_err(|_| format!("{} has no plan.md yet", file_name(run)))?;
+    let check =
+        plan_step_check(&plan, step).ok_or_else(|| format!("step {step} is not in plan.md"))?;
+    command_check(&check).map(str::to_string).ok_or_else(|| {
+        format!(
+            "step {step}'s check is not a command; write it as `check: $ <command>` so sw can run it"
+        )
+    })
+}
+
+fn run_check(run: &Path, step: &str) -> Result<()> {
+    let cmd = step_command(run, step)?;
+    let mut event = serde_json::Map::new();
+    event.insert("event".into(), "receipt".into());
+    event.insert("step".into(), step.into());
+    event.insert("cmd".into(), cmd.clone().into());
+    event.insert("cwd".into(), current_dir()?.into());
+    let tampered = tampered_paths(run)?;
+    if !tampered.is_empty() {
+        let list = tampered.join(", ");
+        event.insert("tampered".into(), tampered.into());
+        event.insert("result".into(), "fail".into());
+        append_json(run, event)?;
+        return Err(format!(
+            "step {step}: tampered: {list} changed since it was frozen, so the check did not run. \
+             If the change is intended, run `sw run freeze` again; the log keeps both."
+        ));
+    }
+    let started = Instant::now();
+    let output = shell(&cmd)?;
+    let secs = started.elapsed().as_secs_f64();
+    let code = output.status.code().unwrap_or(-1);
+    let mut text = output.stdout;
+    if !output.stderr.is_empty() {
+        text.extend_from_slice(b"--- stderr ---\n");
+        text.extend_from_slice(&output.stderr);
+    }
+    let checks = run.join("checks");
+    fs::create_dir_all(&checks).map_err(|e| e.to_string())?;
+    let stamp = now().replace([':', 'T'], "");
+    let mut log_path = checks.join(format!("{step}-{stamp}.log"));
+    let mut n = 1;
+    while log_path.exists() {
+        n += 1;
+        log_path = checks.join(format!("{step}-{stamp}-{n}.log"));
+    }
+    fs::write(&log_path, &text).map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
+    let tree = worktree_hash()?;
+    event.insert("exit".into(), code.into());
+    event.insert("ok".into(), (code == 0).into());
+    event.insert("secs".into(), ((secs * 10.0).round() / 10.0).into());
+    event.insert(
+        "out_sha256".into(),
+        format!("{:x}", Sha256::digest(&text)).into(),
+    );
+    event.insert("log".into(), file_name(&log_path).into());
+    event.insert("tree".into(), tree.clone().into());
+    if code != 0 {
+        event.insert("result".into(), "fail".into());
+    }
+    append_json(run, event)?;
+    if code == 0 {
+        println!(
+            "step {step}: check passed (exit 0, {secs:.1}s, tree {}); `sw run done` when the step's work is complete",
+            short(&tree)
+        );
+        Ok(())
+    } else {
+        Err(format!(
+            "step {step}: check failed (exit {code}); output in {}",
+            log_path.display()
+        ))
+    }
+}
+
+fn current_dir() -> Result<String> {
+    std::env::current_dir()
+        .map(|d| d.to_string_lossy().into_owned())
+        .map_err(|e| format!("cannot read the current directory: {e}"))
+}
+
+fn short(hash: &str) -> &str {
+    if hash.len() > 12 {
+        &hash[..12]
+    } else {
+        hash
+    }
+}
+
+fn run_done(run: &Path, step: &str) -> Result<()> {
+    let cmd = step_command(run, step)?;
+    let receipt = latest_receipt(run, step)?
+        .ok_or_else(|| format!("step {step}: no receipt; run `sw run check <run> {step}` first"))?;
+    if receipt.get("ok") != Some(&serde_json::Value::Bool(true)) {
+        return Err(format!(
+            "step {step}: the last check failed or was tampered; fix it and run `sw run check` again"
+        ));
+    }
+    let tampered = tampered_paths(run)?;
+    if !tampered.is_empty() {
+        return Err(format!(
+            "step {step}: tampered: {} changed after the check; freeze again and run `sw run check`",
+            tampered.join(", ")
+        ));
+    }
+    let here = current_dir()?;
+    let there = receipt.get("cwd").map(value_str).unwrap_or_default();
+    if there != here {
+        return Err(format!(
+            "step {step}: the check ran in another directory ({there}); run `sw run done` from there, or check again here"
+        ));
+    }
+    if git_top().is_none() {
+        eprintln!(
+            "warning: no git repository here, so the receipt is not tied to the files; anything may have changed since the check"
+        );
+    }
+    let ran = receipt.get("cmd").map(value_str).unwrap_or_default();
+    if ran != cmd {
+        return Err(format!(
+            "step {step}: the plan's check changed since the receipt (it ran `{ran}`, plan.md now says `{cmd}`); run `sw run check` again"
+        ));
+    }
+    let then = receipt.get("tree").map(value_str).unwrap_or_default();
+    let tree = worktree_hash()?;
+    if then != tree {
+        return Err(format!(
+            "step {step}: stale receipt: the working tree changed since the check (was {}, now {}); run `sw run check` again",
+            short(&then),
+            short(&tree)
+        ));
+    }
+    let mut event = serde_json::Map::new();
+    event.insert("step".into(), step.into());
+    event.insert("result".into(), "pass".into());
+    event.insert("certified".into(), true.into());
+    event.insert("check".into(), cmd.clone().into());
+    event.insert("tree".into(), tree.clone().into());
+    if let Some(ts) = receipt.get("ts") {
+        event.insert("receipt".into(), ts.clone());
+    }
+    if let Some(top) = git_top() {
+        let label = format!("step-{step}");
+        let commit = take_snapshot(
+            &top,
+            run,
+            &label,
+            &format!("sw snapshot at step {step} done"),
+        )?;
+        event.insert("snapshot".into(), commit.into());
+    }
+    append_json(run, event)?;
+    println!(
+        "step {step}: done, certified (`{cmd}` exit 0 on tree {})",
+        short(&tree)
+    );
+    Ok(())
+}
+
+fn run_freeze(run: &Path, paths: &[String]) -> Result<()> {
+    let mut files = serde_json::Map::new();
+    for path in paths {
+        // Absolute, so the check compares the same files from any directory; not resolved,
+        // so a frozen symlink stays the link itself and retargeting it is caught.
+        let full = std::path::absolute(path).map_err(|e| format!("cannot freeze {path}: {e}"))?;
+        let hash = frozen_hash(&full).map_err(|e| format!("cannot freeze {path}: {e}"))?;
+        files.insert(full.to_string_lossy().into_owned(), hash.into());
+    }
+    let mut event = serde_json::Map::new();
+    event.insert("event".into(), "freeze".into());
+    event.insert("files".into(), files.into());
+    append_json(run, event)?;
+    println!(
+        "frozen: {}; any change fails the step's check until frozen again",
+        paths.join(", ")
+    );
+    Ok(())
 }
 
 fn slugify(text: &str) -> String {
@@ -1004,14 +1597,39 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             println!("{}", dir.display());
         }
         RunCmd::Log { run, pairs } => {
-            let mut parsed = Vec::new();
+            let mut parsed: Vec<(String, String)> = Vec::new();
             for pair in pairs {
                 match pair.split_once('=') {
-                    Some((k, v)) => parsed.push((k.to_string(), v.to_string())),
+                    Some((k, v)) => {
+                        if parsed.iter().any(|(seen, _)| seen == k) {
+                            return Err(format!("duplicate key '{k}': each key once"));
+                        }
+                        parsed.push((k.to_string(), v.to_string()));
+                    }
                     None => return Err(format!("expected key=value, got '{pair}'")),
                 }
             }
-            append_event(&store.resolve_run(&run)?, &parsed)?;
+            let dir = store.resolve_run(&run)?;
+            let value = |key: &str| {
+                parsed
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.clone())
+            };
+            if let (Some(step), Some(result)) = (value("step"), value("result")) {
+                let plan = fs::read_to_string(dir.join("plan.md")).unwrap_or_default();
+                let is_command = plan_step_check(&plan, &step)
+                    .as_deref()
+                    .and_then(command_check)
+                    .is_some();
+                if result == "pass" && is_command {
+                    return Err(format!(
+                        "step {step} has a command check; a pass written by hand is not evidence. \
+                         Run `sw run check {run} {step}`, then `sw run done {run} {step}`."
+                    ));
+                }
+            }
+            append_event(&dir, &parsed)?;
         }
         RunCmd::Status { run } => {
             let dir = store.resolve_run(&run)?;
@@ -1038,6 +1656,11 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             }
         }
         RunCmd::Cost { run } => run_cost(store, &store.resolve_run(&run)?)?,
+        RunCmd::Check { run, step } => run_check(&store.resolve_run(&run)?, &step)?,
+        RunCmd::Done { run, step } => run_done(&store.resolve_run(&run)?, &step)?,
+        RunCmd::Freeze { run, paths } => run_freeze(&store.resolve_run(&run)?, &paths)?,
+        RunCmd::Snapshot { run, step } => run_snapshot(&store.resolve_run(&run)?, &step)?,
+        RunCmd::Rewind { run, step } => run_rewind(&store.resolve_run(&run)?, &step)?,
     }
     Ok(())
 }
@@ -1352,6 +1975,30 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn step_checks_are_found_and_commands_recognised() {
+        let plan = "# Goal\n1. a | who: self | check: $ cargo test | after: -\n2. b | check: reviewer reads it\n";
+        assert_eq!(plan_step_check(plan, "1").as_deref(), Some("$ cargo test"));
+        assert_eq!(command_check("$ cargo test"), Some("cargo test"));
+        assert_eq!(
+            plan_step_check(plan, "2").as_deref(),
+            Some("reviewer reads it")
+        );
+        assert_eq!(command_check("reviewer reads it"), None);
+        assert_eq!(command_check("$"), None);
+        assert_eq!(command_check("$5 refund shown"), None);
+        assert_eq!(plan_step_check(plan, "3"), None);
+        let trailing = "1. a | check: $ true | who: self | after: 1\n";
+        assert_eq!(plan_step_check(trailing, "1").as_deref(), Some("$ true"));
+        let piped =
+            "1. a | who: self | check: $ ls | wc -l | grep -q 2 | after: -\n2. b | check: $ true\n";
+        assert_eq!(
+            plan_step_check(piped, "1").as_deref(),
+            Some("$ ls | wc -l | grep -q 2")
+        );
+        assert_eq!(plan_step_check(piped, "2").as_deref(), Some("$ true"));
+    }
 
     #[test]
     fn steps_need_a_check() {

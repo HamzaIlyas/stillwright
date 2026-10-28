@@ -393,5 +393,340 @@ class CacheTests(SwTestCase):
             self.sw("cache", str(p))
 
 
+class CertificateTests(SwTestCase):
+    """A step with a `$` check is done only with a receipt that is still fresh (mechanism 1)."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        self.work.mkdir()
+        git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run([*git, "init", "-q"], cwd=self.work, check=True)
+        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], cwd=self.work, check=True)
+        (self.work / "tests").mkdir()
+        (self.work / "tests" / "t.sh").write_text("exit 0\n")
+        self.run = pathlib.Path(self.sw("run", "new", "cert").strip())
+        (self.run / "plan.md").write_text(
+            "# Goal: x\n1. a | check: $ sh tests/t.sh\n2. b | check: reviewer reads it\nOutward: none\n"
+        )
+
+    def events(self):
+        return [json.loads(l) for l in (self.run / "log.jsonl").read_text().splitlines() if l.strip()]
+
+    def receipts(self, step="1"):
+        return [e for e in self.events() if e.get("event") == "receipt" and e.get("step") == step]
+
+    def test_check_runs_the_command_and_writes_a_receipt(self):
+        out = self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("pass", out)
+        receipt = self.receipts()[-1]
+        self.assertEqual(receipt["cmd"], "sh tests/t.sh")
+        self.assertEqual(receipt["exit"], 0)
+        self.assertEqual(len(receipt["tree"]), 40)
+        self.assertEqual(len(receipt["out_sha256"]), 64)
+        logs = list((self.run / "checks").glob("1-*.log"))
+        self.assertEqual(len(logs), 1)
+        # a passing check is not yet "done": the step still needs sw run done
+        self.assertIn("next: step 1", self.sw("run", "status"))
+
+    def test_failing_check_is_logged_and_exits_nonzero(self):
+        (self.work / "tests" / "t.sh").write_text("echo boom; exit 3\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("exit 3", str(cm.exception))
+        self.assertEqual(self.receipts()[-1]["result"], "fail")
+        self.assertIn("step 1: fail", self.sw("run", "status"))
+
+    @unittest.skipIf(os.name == "nt", "no pipefail on Windows (cmd /C)")
+    def test_a_failure_inside_a_pipe_fails_the_check(self):
+        (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $ false | cat\n")
+        with self.assertRaises(Failed):
+            self.sw("run", "check", "latest", "1", cwd=self.work)
+
+    def test_pass_claim_without_a_receipt_is_refused(self):
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "log", "latest", "step=1", "result=pass")
+        self.assertIn("sw run check", str(cm.exception))
+        self.assertEqual(self.events(), [])
+        # a step whose check is not a command may still be logged (reviewer path)
+        self.sw("run", "log", "latest", "step=2", "result=pass")
+
+    def test_done_needs_a_receipt_from_the_current_worktree(self):
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("no receipt", str(cm.exception))
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.work / "new.txt").write_text("edited after the check\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("stale", str(cm.exception))
+        self.assertIn("next: step 1", self.sw("run", "status"))
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+        done = self.events()[-1]
+        self.assertEqual((done["step"], done["result"], done["certified"]), ("1", "pass", True))
+        self.assertIn("next: step 2", self.sw("run", "status"))
+
+    def test_done_refuses_a_failed_receipt(self):
+        (self.work / "tests" / "t.sh").write_text("exit 1\n")
+        with self.assertRaises(Failed):
+            self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("fail", str(cm.exception))
+
+    def test_frozen_check_files_detect_tampering(self):
+        self.sw("run", "freeze", "latest", "tests", cwd=self.work)
+        frozen = os.path.realpath(self.work / "tests")
+        stored = list(self.events()[-1]["files"])
+        # Windows may report the 8.3 short form of the temp folder; compare real paths.
+        self.assertEqual([os.path.realpath(p) for p in stored], [frozen])
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.work / "tests" / "t.sh").write_text("exit 0 # weakened\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("tamper", str(cm.exception))
+        self.assertEqual([os.path.realpath(p) for p in self.receipts()[-1]["tampered"]], [frozen])
+        self.assertEqual(self.receipts()[-1]["result"], "fail")
+        with self.assertRaises(Failed):
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        # an explicit re-freeze is the only way on, and it stays in the log
+        self.sw("run", "freeze", "latest", "tests", cwd=self.work)
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_pipes_inside_a_check_are_kept(self):
+        (self.run / "plan.md").write_text(
+            "# Goal: x\n1. a | who: self | check: $ printf 'x\\ny\\n' | wc -l | grep -q 2 | after: -\n"
+        )
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertEqual(self.receipts()[-1]["cmd"], "printf 'x\\ny\\n' | wc -l | grep -q 2")
+
+    def test_duplicate_keys_in_log_are_refused(self):
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "log", "latest", "step=1", "result=fail", "result=pass")
+        self.assertIn("duplicate", str(cm.exception))
+        with self.assertRaises(Failed):
+            self.sw("run", "log", "latest", "step=2", "step=1", "result=pass")
+        self.assertEqual(self.events(), [])
+
+    def test_done_refuses_when_the_plan_command_changed(self):
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        plan = (self.run / "plan.md").read_text().replace("$ sh tests/t.sh", "$ true")
+        (self.run / "plan.md").write_text(plan)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("plan", str(cm.exception))
+
+    def test_prose_check_starting_with_a_dollar_sign_is_not_a_command(self):
+        (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $5 refund shown\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("not a command", str(cm.exception))
+        self.sw("run", "log", "latest", "step=1", "result=pass")
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "needs a file git cannot read")
+    def test_git_failure_inside_a_repo_is_an_error_not_a_pass(self):
+        locked = self.work / "locked.txt"
+        locked.write_text("x")
+        locked.chmod(0)
+        try:
+            with self.assertRaises(Failed) as cm:
+                self.sw("run", "check", "latest", "1", cwd=self.work)
+            self.assertIn("git", str(cm.exception))
+            self.assertEqual(self.receipts(), [])
+        finally:
+            locked.chmod(0o644)
+
+    def test_state_folder_inside_the_repo_does_not_make_receipts_stale(self):
+        self.env["STILLWRIGHT_HOME"] = str(self.work / ".swh")
+        run = pathlib.Path(self.sw("run", "new", "inside").strip())
+        (run / "plan.md").write_text("# Goal: x\n1. a | check: $ sh tests/t.sh\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_frozen_paths_are_absolute_so_the_directory_does_not_matter(self):
+        self.sw("run", "freeze", "latest", "tests", cwd=self.work)
+        sub = self.work / "sub"
+        sub.mkdir()
+        (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $ sh ../tests/t.sh\n")
+        self.sw("run", "check", "latest", "1", cwd=sub)
+        (self.work / "tests" / "t.sh").write_text("exit 0 # changed\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "check", "latest", "1", cwd=sub)
+        self.assertIn("tamper", str(cm.exception))
+
+    def test_done_also_detects_tampering(self):
+        self.sw("run", "freeze", "latest", "tests", cwd=self.work)
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.work / "tests" / "t.sh").write_text("exit 0 # after the check\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("tamper", str(cm.exception))
+
+    def test_check_writes_no_objects_into_the_repo(self):
+        def objects():
+            return subprocess.run(["git", "count-objects"], cwd=self.work, capture_output=True, text=True).stdout
+        (self.work / "new.txt").write_text("new\n")
+        before = objects()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertEqual(objects(), before)
+
+    @unittest.skipIf(os.name == "nt", "symlinks")
+    def test_retargeting_a_frozen_symlink_is_tampering(self):
+        (self.work / "real.sh").write_text("exit 0\n")
+        (self.work / "weak.sh").write_text("exit 0 # weak\n")
+        (self.work / "link.sh").symlink_to("real.sh")
+        (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $ sh link.sh\n")
+        self.sw("run", "freeze", "latest", "link.sh", cwd=self.work)
+        self.assertEqual(list(self.events()[-1]["files"]), [str(self.work.resolve() / "link.sh")])
+        (self.work / "link.sh").unlink()
+        (self.work / "link.sh").symlink_to("weak.sh")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("tamper", str(cm.exception))
+
+    def test_done_must_run_where_the_check_ran(self):
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertEqual(os.path.realpath(self.receipts()[-1]["cwd"]), os.path.realpath(self.work))
+        sub = self.work / "sub"
+        sub.mkdir()
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=sub)
+        self.assertIn("directory", str(cm.exception))
+
+    def test_check_outside_git_still_works(self):
+        plain = pathlib.Path(self.tmp.name) / "plain"
+        plain.mkdir()
+        (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $ true\n")
+        self.sw("run", "check", "latest", "1", cwd=plain)
+        self.assertEqual(self.receipts()[-1]["tree"], "none")
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=plain))
+
+
+class RewindTests(SwTestCase):
+    """Every certified step leaves a snapshot; `sw run rewind` brings the files back (mechanism 2)."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        self.work.mkdir()
+        self.git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run([*self.git, "init", "-q"], cwd=self.work, check=True)
+        (self.work / ".gitignore").write_text("build/\n")
+        (self.work / "a.txt").write_text("v1\n")
+        (self.work / "tests").mkdir()
+        (self.work / "tests" / "t.sh").write_text("exit 0\n")
+        subprocess.run([*self.git, "add", "-A"], cwd=self.work, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "init"], cwd=self.work, check=True)
+        self.run = pathlib.Path(self.sw("run", "new", "rew").strip())
+        (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $ sh tests/t.sh\n2. b | check: $ true\n")
+
+    def events(self):
+        return [json.loads(l) for l in (self.run / "log.jsonl").read_text().splitlines() if l.strip()]
+
+    def refs(self):
+        out = subprocess.run(["git", "for-each-ref", "--format=%(refname)", "refs/sw/"],
+                             cwd=self.work, capture_output=True, text=True, check=True).stdout
+        return out.split()
+
+    def tree_files(self, ref):
+        out = subprocess.run(["git", "ls-tree", "-r", "--name-only", ref],
+                             cwd=self.work, capture_output=True, text=True, check=True).stdout
+        return out.split()
+
+    def certify(self, step):
+        self.sw("run", "check", "latest", step, cwd=self.work)
+        return self.sw("run", "done", "latest", step, cwd=self.work)
+
+    def test_done_leaves_a_snapshot_of_the_tree(self):
+        (self.work / "untracked.txt").write_text("kept\n")
+        self.certify("1")
+        done = self.events()[-1]
+        self.assertEqual(len(done["snapshot"]), 40)
+        self.assertEqual(self.refs(), [f"refs/sw/{self.run.name}/step-1"])
+        self.assertIn("untracked.txt", self.tree_files(f"refs/sw/{self.run.name}/step-1"))
+
+    def test_rewind_restores_the_step_and_keeps_what_it_removed(self):
+        self.certify("1")
+        (self.work / "a.txt").write_text("v2\n")
+        (self.work / "junk.txt").write_text("later\n")
+        (self.work / "tests" / "t.sh").unlink()
+        (self.work / "build").mkdir()
+        (self.work / "build" / "out.o").write_text("ignored\n")
+        out = self.sw("run", "rewind", "latest", "1", cwd=self.work)
+        self.assertIn("step 1", out)
+        self.assertEqual((self.work / "a.txt").read_text(), "v1\n")
+        self.assertFalse((self.work / "junk.txt").exists())
+        self.assertEqual((self.work / "tests" / "t.sh").read_text(), "exit 0\n")
+        self.assertTrue((self.work / "build" / "out.o").exists(), "ignored files are not touched")
+        before = [r for r in self.refs() if "before-rewind" in r]
+        self.assertEqual(len(before), 1)
+        self.assertIn("junk.txt", self.tree_files(before[0]))
+        self.assertEqual(self.events()[-1]["event"], "rewind")
+        self.assertEqual(self.events()[-1]["step"], "1")
+
+    def test_rewind_without_a_snapshot_is_refused(self):
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "rewind", "latest", "2", cwd=self.work)
+        self.assertIn("no snapshot", str(cm.exception))
+
+    def test_manual_snapshot_before_a_step(self):
+        (self.work / "a.txt").write_text("v1b\n")
+        out = self.sw("run", "snapshot", "latest", "2", cwd=self.work)
+        self.assertIn("step 2", out)
+        self.assertEqual(self.events()[-1]["event"], "snapshot")
+        self.assertIn(f"refs/sw/{self.run.name}/step-2", self.refs())
+        (self.work / "a.txt").write_text("broken\n")
+        self.sw("run", "rewind", "latest", "2", cwd=self.work)
+        self.assertEqual((self.work / "a.txt").read_text(), "v1b\n")
+
+    def test_rewind_keeps_the_state_folder_inside_the_repo(self):
+        self.env["STILLWRIGHT_HOME"] = str(self.work / ".swh")
+        run = pathlib.Path(self.sw("run", "new", "inside").strip())
+        (run / "plan.md").write_text("# Goal: x\n1. a | check: $ true\n")
+        self.certify("1")
+        (self.work / "junk.txt").write_text("x\n")
+        self.sw("run", "rewind", "latest", "1", cwd=self.work)
+        self.assertTrue((run / "plan.md").exists())
+        self.assertFalse((self.work / "junk.txt").exists())
+        self.assertIn('"rewind"', (run / "log.jsonl").read_text())
+
+    def test_two_rewinds_in_a_row_keep_both_states(self):
+        self.certify("1")
+        (self.work / "precious.txt").write_text("keep me\n")
+        self.sw("run", "rewind", "latest", "1", cwd=self.work)
+        self.sw("run", "rewind", "latest", "1", cwd=self.work)
+        kept = [r for r in self.refs() if "before-rewind" in r]
+        self.assertEqual(len(kept), 2)
+        self.assertTrue(any("precious.txt" in self.tree_files(r) for r in kept))
+
+    def test_rewind_removes_files_with_non_ascii_names(self):
+        self.certify("1")
+        (self.work / "späce ü.txt").write_text("x\n")
+        (self.work / "deep" / "er").mkdir(parents=True)
+        (self.work / "deep" / "er" / "n.txt").write_text("x\n")
+        self.sw("run", "rewind", "latest", "1", cwd=self.work)
+        self.assertFalse((self.work / "späce ü.txt").exists())
+        self.assertFalse((self.work / "deep").exists(), "emptied directories are removed too")
+
+    def test_done_works_without_a_git_identity(self):
+        self.env["GIT_CONFIG_GLOBAL"] = os.devnull
+        self.env["GIT_CONFIG_SYSTEM"] = os.devnull
+        for key in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+            self.env.pop(key, None)
+        self.assertIn("certified", self.certify("1"))
+
+    def test_snapshot_outside_git_is_refused_but_done_still_works(self):
+        plain = pathlib.Path(self.tmp.name) / "plain"
+        plain.mkdir()
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "snapshot", "latest", "1", cwd=plain)
+        self.assertIn("git", str(cm.exception))
+        self.sw("run", "check", "latest", "2", cwd=plain)
+        self.sw("run", "done", "latest", "2", cwd=plain)
+        self.assertNotIn("snapshot", self.events()[-1])
+
+
 if __name__ == "__main__":
     unittest.main()

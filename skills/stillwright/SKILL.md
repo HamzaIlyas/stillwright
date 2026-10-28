@@ -55,7 +55,16 @@ the user's call. `sw status` gives a one-screen summary; `sw --help` lists every
    1. <step> | who: <route> | check: <exact check> | after: <step numbers or ->
    Outward: <actions needing approval, or none>
    ```
-   Only numbered lines containing `| check:` count as steps.
+   Only numbered lines containing `| check:` count as steps. Write the check as a command
+   whenever one can decide: `check: $ <command>` (exit 0 means pass; pipes inside it are
+   kept, so put `check:` last before `after:`). Then `sw run check latest N` runs it and
+   writes a receipt, and `sw run done latest N` is the only way to pass the step. Before the
+   work starts, `sw run freeze latest <tests or scripts the checks depend on>` records their
+   hashes: changing them afterwards fails the check as tampering until frozen again.
+   In a git repository, `sw run snapshot latest N` before starting step N saves the working
+   tree (untracked files included) under `refs/sw/<run>/step-N`; `sw run done` saves one too.
+   If a step goes wrong, `sw run rewind latest N` puts the files back as they were at that
+   snapshot and keeps the state it replaced, so nothing is ever lost.
    If the plan has outward actions, or the goal is new to the user, add a `review` card and
    wait for it. Otherwise go.
 4. **Get capabilities.** For each step, find the best tool: installed skills/agents first,
@@ -72,12 +81,17 @@ the user's call. `sw status` gives a one-screen summary; `sw --help` lists every
    error in the brief; Anthropic measured low-first-then-retry at about 40% less cost than
    running everything high, for the same success. Specialist skills: `sw-deep-search` for
    research, `sw-context-diet` when context grows heavy, `sw-launch` for marketing.
-6. **Verify, without paying twice.** If the step's check is a command, run it and read the
-   output; that is the verdict, and no reviewer is needed. Only when nothing executable can
+6. **Verify, without paying twice.** If the step's check is a command (`$`), run
+   `sw run check latest N`: it runs the command, saves the output under the run's `checks/`,
+   and writes a receipt with the exit code and a hash of the working tree. Read the output,
+   finish the step's work, then `sw run done latest N`; it refuses a failed receipt and a
+   stale one (tree changed since the check: run the check again). A pass logged by hand is
+   refused for such steps, so there is nothing to claim. Only when nothing executable can
    decide (writing, research, a design) use the fresh reviewer from `sw-verify`, on the small
-   model. Then log the step with its cost:
+   model, and log its verdict with the step's cost:
    `sw run log latest step=N who=<route> model=<model> in=<tokens> out=<tokens> check="<check>" result=pass|fail note="<one line>"`
    (`in`/`out` from the subagent's usage report; omit them only when the harness gives none).
+   For command steps, log cost the same way without `result=`.
    `sw run cost` sums the run in dollars at the prices in `~/.stillwright/prices.json`.
 7. **Finish.** Mark the goal done. Add one `notify` card: what was done and the proof
    (link, file, test output), in at most 5 lines. Your final message to the user is that
