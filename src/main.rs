@@ -237,6 +237,18 @@ enum RunCmd {
         #[arg(required = true)]
         paths: Vec<String>,
     },
+    /// Save the working tree (untracked files included) as a git snapshot for a step, before
+    /// starting it. `sw run done` takes one on its own.
+    Snapshot {
+        run: String,
+        step: String,
+    },
+    /// Put the working tree back as it was in a step's snapshot. The state being replaced is
+    /// saved first, so a rewind can itself be undone.
+    Rewind {
+        run: String,
+        step: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -588,39 +600,146 @@ fn command_check(check: &str) -> Option<&str> {
         .filter(|c| !c.is_empty())
 }
 
-/// Hash of the working tree as git would commit it, untracked files included; "none" outside
-/// a repository. Uses a throw-away index so the user's staging area is never touched.
-fn worktree_hash() -> String {
-    let top = match Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-    {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        _ => return "none".into(),
-    };
-    let index = std::env::temp_dir().join(format!("sw-index-{}", std::process::id()));
-    let _ = fs::remove_file(&index);
-    let added = Command::new("git")
-        .env("GIT_INDEX_FILE", &index)
-        .args(["add", "-A", "--", "."])
-        .current_dir(&top)
-        .output();
-    let tree = match added {
-        Ok(out) if out.status.success() => Command::new("git")
-            .env("GIT_INDEX_FILE", &index)
-            .arg("write-tree")
-            .current_dir(&top)
-            .output(),
-        _ => {
-            let _ = fs::remove_file(&index);
-            return "none".into();
-        }
-    };
-    let _ = fs::remove_file(&index);
-    match tree {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        _ => "none".into(),
+/// Top folder of the git repository the current directory is in.
+fn git_top() -> Option<String> {
+    git(None, None, &["rev-parse", "--show-toplevel"])
+}
+
+/// Run git in `dir`, with an alternative index when given; stdout on success, None otherwise.
+fn git(dir: Option<&str>, index: Option<&Path>, args: &[&str]) -> Option<String> {
+    let mut cmd = Command::new("git");
+    cmd.args(args);
+    if let Some(dir) = dir {
+        cmd.current_dir(dir);
     }
+    if let Some(index) = index {
+        cmd.env("GIT_INDEX_FILE", index);
+    }
+    match cmd.output() {
+        Ok(out) if out.status.success() => {
+            Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        }
+        _ => None,
+    }
+}
+
+/// A throw-away index path, so the user's staging area is never touched.
+fn temp_index() -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "sw-index-{}-{}",
+        std::process::id(),
+        now().replace([':', 'T', '-'], "")
+    ));
+    let _ = fs::remove_file(&path);
+    path
+}
+
+/// Tree object of the working tree as git would commit it: untracked files included, ignored
+/// files left out.
+fn tree_of_worktree(top: &str) -> Option<String> {
+    let index = temp_index();
+    let tree = git(Some(top), Some(&index), &["add", "-A", "--", "."])
+        .and_then(|_| git(Some(top), Some(&index), &["write-tree"]));
+    let _ = fs::remove_file(&index);
+    tree
+}
+
+/// Hash of the working tree; "none" outside a repository.
+fn worktree_hash() -> String {
+    git_top()
+        .and_then(|top| tree_of_worktree(&top))
+        .unwrap_or_else(|| "none".into())
+}
+
+/// Commit the working tree as a snapshot under `refs/sw/<run>/<label>`; the user's branch,
+/// index and HEAD are untouched. Returns the commit hash.
+fn take_snapshot(top: &str, run: &Path, label: &str, message: &str) -> Result<String> {
+    let tree = tree_of_worktree(top).ok_or("cannot read the working tree with git")?;
+    let mut args = vec!["commit-tree", tree.as_str(), "-m", message];
+    if git(Some(top), None, &["rev-parse", "--verify", "-q", "HEAD"]).is_some() {
+        args.extend(["-p", "HEAD"]);
+    }
+    let commit = git(Some(top), None, &args).ok_or("git commit-tree failed")?;
+    let reference = snapshot_ref(run, label);
+    git(Some(top), None, &["update-ref", &reference, &commit])
+        .ok_or_else(|| format!("cannot write {reference}"))?;
+    Ok(commit)
+}
+
+fn snapshot_ref(run: &Path, label: &str) -> String {
+    format!("refs/sw/{}/{label}", file_name(run))
+}
+
+fn run_snapshot(run: &Path, step: &str) -> Result<()> {
+    let top = git_top().ok_or("a snapshot needs a git repository here")?;
+    let label = format!("step-{step}");
+    let commit = take_snapshot(
+        &top,
+        run,
+        &label,
+        &format!("sw snapshot before step {step}"),
+    )?;
+    let mut event = serde_json::Map::new();
+    event.insert("event".into(), "snapshot".into());
+    event.insert("step".into(), step.into());
+    event.insert("commit".into(), commit.clone().into());
+    append_json(run, event)?;
+    println!(
+        "step {step}: snapshot {} saved at {}",
+        short(&commit),
+        snapshot_ref(run, &label)
+    );
+    Ok(())
+}
+
+/// Restore the files of a step's snapshot. Files that exist now but not in the snapshot are
+/// removed unless git ignores them; the state being replaced is snapshotted first.
+fn run_rewind(run: &Path, step: &str) -> Result<()> {
+    let top = git_top().ok_or("a rewind needs a git repository here")?;
+    let target = snapshot_ref(run, &format!("step-{step}"));
+    let commit =
+        git(Some(&top), None, &["rev-parse", "--verify", "-q", &target]).ok_or_else(|| {
+            format!("step {step}: no snapshot; `sw run done` and `sw run snapshot` take them")
+        })?;
+    let kept_label = format!("before-rewind-{}", now().replace([':', 'T'], ""));
+    let kept = take_snapshot(
+        &top,
+        run,
+        &kept_label,
+        &format!("sw state before rewinding to step {step}"),
+    )?;
+    let index = temp_index();
+    let restored = git(Some(&top), Some(&index), &["read-tree", &commit])
+        .and_then(|_| git(Some(&top), Some(&index), &["checkout-index", "-a", "-f"]))
+        .and_then(|_| {
+            git(
+                Some(&top),
+                Some(&index),
+                &["ls-files", "--others", "--exclude-standard"],
+            )
+        });
+    let _ = fs::remove_file(&index);
+    let extra = restored.ok_or("git could not restore the snapshot")?;
+    let mut removed = 0;
+    for rel in extra.lines().filter(|l| !l.is_empty()) {
+        let path = Path::new(&top).join(rel);
+        if fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    let mut event = serde_json::Map::new();
+    event.insert("event".into(), "rewind".into());
+    event.insert("step".into(), step.into());
+    event.insert("commit".into(), commit.clone().into());
+    event.insert("kept".into(), kept.clone().into());
+    event.insert("removed".into(), removed.into());
+    append_json(run, event)?;
+    println!(
+        "step {step}: files restored from snapshot {} ({removed} newer files removed); the state before is kept at {}",
+        short(&commit),
+        snapshot_ref(run, &kept_label)
+    );
+    Ok(())
 }
 
 fn shell(cmd: &str) -> Result<std::process::Output> {
@@ -790,6 +909,16 @@ fn run_done(run: &Path, step: &str) -> Result<()> {
     event.insert("tree".into(), tree.clone().into());
     if let Some(ts) = receipt.get("ts") {
         event.insert("receipt".into(), ts.clone());
+    }
+    if let Some(top) = git_top() {
+        let label = format!("step-{step}");
+        let commit = take_snapshot(
+            &top,
+            run,
+            &label,
+            &format!("sw snapshot at step {step} done"),
+        )?;
+        event.insert("snapshot".into(), commit.into());
     }
     append_json(run, event)?;
     println!(
@@ -1360,6 +1489,8 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
         RunCmd::Check { run, step } => run_check(&store.resolve_run(&run)?, &step)?,
         RunCmd::Done { run, step } => run_done(&store.resolve_run(&run)?, &step)?,
         RunCmd::Freeze { run, paths } => run_freeze(&store.resolve_run(&run)?, &paths)?,
+        RunCmd::Snapshot { run, step } => run_snapshot(&store.resolve_run(&run)?, &step)?,
+        RunCmd::Rewind { run, step } => run_rewind(&store.resolve_run(&run)?, &step)?,
     }
     Ok(())
 }

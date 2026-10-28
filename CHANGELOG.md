@@ -2,6 +2,7 @@
 
 ## Unreleased
 - Certificates: a step whose check is `check: $ <command>` is proven, not claimed. `sw run check` runs the command (bash with pipefail, so a failure inside a pipe fails) and writes a receipt: command, exit code, output hash, output file under `checks/`, hash of the working tree as git would commit it (untracked files included). `sw run done` passes the step only with a passing receipt taken on the working tree as it is now; `sw run log … result=pass` is refused for such steps. `sw run freeze <paths>` records the hashes of test and script files; any later change fails the check as tampered until they are frozen again, and both freezes stay in the log. The stillwright skill now writes checks as commands.
+- Rewind: every `sw run done` in a git repository saves a snapshot of the working tree (untracked files included, ignored files left out) as a commit under `refs/sw/<run>/step-N`, without touching the branch, index or HEAD; `sw run snapshot <run> <step>` saves one before a step starts. `sw run rewind <run> <step>` restores the files of that snapshot, removes files added since (never ignored ones), and first saves the state it replaces under `refs/sw/<run>/before-rewind-<time>`, so a rewind can be undone.
 
 ## 0.1.5 - 2026-10-26
 - `sw run cost` (dollars per run from logged tokens at `prices.json` rates) and `sw cache` (names the turns that broke the prompt cache in a Claude Code transcript).

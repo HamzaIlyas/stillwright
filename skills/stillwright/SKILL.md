@@ -61,6 +61,10 @@ the user's call. `sw status` gives a one-screen summary; `sw --help` lists every
    writes a receipt, and `sw run done latest N` is the only way to pass the step. Before the
    work starts, `sw run freeze latest <tests or scripts the checks depend on>` records their
    hashes: changing them afterwards fails the check as tampering until frozen again.
+   In a git repository, `sw run snapshot latest N` before starting step N saves the working
+   tree (untracked files included) under `refs/sw/<run>/step-N`; `sw run done` saves one too.
+   If a step goes wrong, `sw run rewind latest N` puts the files back as they were at that
+   snapshot and keeps the state it replaced, so nothing is ever lost.
    If the plan has outward actions, or the goal is new to the user, add a `review` card and
    wait for it. Otherwise go.
 4. **Get capabilities.** For each step, find the best tool: installed skills/agents first,

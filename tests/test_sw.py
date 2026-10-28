@@ -507,5 +507,93 @@ class CertificateTests(SwTestCase):
         self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=plain))
 
 
+class RewindTests(SwTestCase):
+    """Every certified step leaves a snapshot; `sw run rewind` brings the files back (mechanism 2)."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        self.work.mkdir()
+        self.git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run([*self.git, "init", "-q"], cwd=self.work, check=True)
+        (self.work / ".gitignore").write_text("build/\n")
+        (self.work / "a.txt").write_text("v1\n")
+        (self.work / "tests").mkdir()
+        (self.work / "tests" / "t.sh").write_text("exit 0\n")
+        subprocess.run([*self.git, "add", "-A"], cwd=self.work, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "init"], cwd=self.work, check=True)
+        self.run = pathlib.Path(self.sw("run", "new", "rew").strip())
+        (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $ sh tests/t.sh\n2. b | check: $ true\n")
+
+    def events(self):
+        return [json.loads(l) for l in (self.run / "log.jsonl").read_text().splitlines() if l.strip()]
+
+    def refs(self):
+        out = subprocess.run(["git", "for-each-ref", "--format=%(refname)", "refs/sw/"],
+                             cwd=self.work, capture_output=True, text=True, check=True).stdout
+        return out.split()
+
+    def tree_files(self, ref):
+        out = subprocess.run(["git", "ls-tree", "-r", "--name-only", ref],
+                             cwd=self.work, capture_output=True, text=True, check=True).stdout
+        return out.split()
+
+    def certify(self, step):
+        self.sw("run", "check", "latest", step, cwd=self.work)
+        return self.sw("run", "done", "latest", step, cwd=self.work)
+
+    def test_done_leaves_a_snapshot_of_the_tree(self):
+        (self.work / "untracked.txt").write_text("kept\n")
+        self.certify("1")
+        done = self.events()[-1]
+        self.assertEqual(len(done["snapshot"]), 40)
+        self.assertEqual(self.refs(), [f"refs/sw/{self.run.name}/step-1"])
+        self.assertIn("untracked.txt", self.tree_files(f"refs/sw/{self.run.name}/step-1"))
+
+    def test_rewind_restores_the_step_and_keeps_what_it_removed(self):
+        self.certify("1")
+        (self.work / "a.txt").write_text("v2\n")
+        (self.work / "junk.txt").write_text("later\n")
+        (self.work / "tests" / "t.sh").unlink()
+        (self.work / "build").mkdir()
+        (self.work / "build" / "out.o").write_text("ignored\n")
+        out = self.sw("run", "rewind", "latest", "1", cwd=self.work)
+        self.assertIn("step 1", out)
+        self.assertEqual((self.work / "a.txt").read_text(), "v1\n")
+        self.assertFalse((self.work / "junk.txt").exists())
+        self.assertEqual((self.work / "tests" / "t.sh").read_text(), "exit 0\n")
+        self.assertTrue((self.work / "build" / "out.o").exists(), "ignored files are not touched")
+        before = [r for r in self.refs() if "before-rewind" in r]
+        self.assertEqual(len(before), 1)
+        self.assertIn("junk.txt", self.tree_files(before[0]))
+        self.assertEqual(self.events()[-1]["event"], "rewind")
+        self.assertEqual(self.events()[-1]["step"], "1")
+
+    def test_rewind_without_a_snapshot_is_refused(self):
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "rewind", "latest", "2", cwd=self.work)
+        self.assertIn("no snapshot", str(cm.exception))
+
+    def test_manual_snapshot_before_a_step(self):
+        (self.work / "a.txt").write_text("v1b\n")
+        out = self.sw("run", "snapshot", "latest", "2", cwd=self.work)
+        self.assertIn("step 2", out)
+        self.assertEqual(self.events()[-1]["event"], "snapshot")
+        self.assertIn(f"refs/sw/{self.run.name}/step-2", self.refs())
+        (self.work / "a.txt").write_text("broken\n")
+        self.sw("run", "rewind", "latest", "2", cwd=self.work)
+        self.assertEqual((self.work / "a.txt").read_text(), "v1b\n")
+
+    def test_snapshot_outside_git_is_refused_but_done_still_works(self):
+        plain = pathlib.Path(self.tmp.name) / "plain"
+        plain.mkdir()
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "snapshot", "latest", "1", cwd=plain)
+        self.assertIn("git", str(cm.exception))
+        self.sw("run", "check", "latest", "2", cwd=plain)
+        self.sw("run", "done", "latest", "2", cwd=plain)
+        self.assertNotIn("snapshot", self.events()[-1])
+
+
 if __name__ == "__main__":
     unittest.main()
