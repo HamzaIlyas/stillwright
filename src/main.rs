@@ -11,7 +11,8 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
+use std::time::Instant;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::de::DeserializeOwned;
@@ -217,6 +218,24 @@ enum RunCmd {
     Cost {
         #[arg(default_value = "latest")]
         run: String,
+    },
+    /// Run a step's `$ <command>` check here and write a receipt (exit code, output hash,
+    /// working-tree hash) to the run's log. A receipt is evidence; `sw run done` is the claim.
+    Check {
+        run: String,
+        step: String,
+    },
+    /// Mark a step done. Needs a passing receipt taken on the working tree as it is now.
+    Done {
+        run: String,
+        step: String,
+    },
+    /// Record the hashes of the files a step's checks depend on (tests, scripts). Any change
+    /// afterwards fails the check as tampering until they are frozen again.
+    Freeze {
+        run: String,
+        #[arg(required = true)]
+        paths: Vec<String>,
     },
 }
 
@@ -506,16 +525,296 @@ impl Progress {
 
 fn append_event(run: &Path, pairs: &[(String, String)]) -> Result<()> {
     let mut event = serde_json::Map::new();
-    event.insert("ts".into(), now().into());
     for (k, v) in pairs {
         event.insert(k.clone(), v.clone().into());
     }
+    append_json(run, event)
+}
+
+fn append_json(run: &Path, mut event: serde_json::Map<String, serde_json::Value>) -> Result<()> {
+    event.insert("ts".into(), now().into());
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(run.join("log.jsonl"))
         .map_err(|e| format!("cannot open run log: {e}"))?;
     writeln!(file, "{}", serde_json::Value::Object(event)).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------- certificates
+//
+// A step whose check is written `check: $ <command>` is proven, not claimed: `sw run check`
+// runs the command and writes a receipt (command, exit code, output hash, hash of the working
+// tree, which frozen files were touched); `sw run done` accepts the step only if the latest
+// receipt passed and the working tree is still the one it was taken on. A pass logged by
+// hand for such a step is refused. Check files frozen with `sw run freeze` fail the check as
+// tampered when they change, so weakening a test leaves a mark in the log.
+
+/// The check text of one step in plan.md, if that step exists. A `$` command keeps its pipes:
+/// it runs to the end of the line, minus a trailing `| after: …` field.
+fn plan_step_check(plan: &str, step: &str) -> Option<String> {
+    plan.lines().find_map(|line| {
+        let digits: String = line.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let rest = &line[digits.len()..];
+        if digits != step || !rest.starts_with('.') {
+            return None;
+        }
+        let mut offset = 0;
+        for part in rest.split('|') {
+            if let Some(check) = part.trim_start().strip_prefix("check:") {
+                let check = check.trim();
+                if !check.starts_with('$') {
+                    return Some(check.to_string());
+                }
+                let whole = rest[offset + (part.len() - part.trim_start().len())..].trim();
+                let whole = whole.strip_prefix("check:").unwrap_or(whole).trim();
+                let whole = match whole.rfind("| after:") {
+                    Some(i) => whole[..i].trim(),
+                    None => whole,
+                };
+                return Some(whole.to_string());
+            }
+            offset += part.len() + 1;
+        }
+        None
+    })
+}
+
+/// A check sw can run itself: `$ <command>`.
+fn command_check(check: &str) -> Option<&str> {
+    check
+        .strip_prefix('$')
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+}
+
+/// Hash of the working tree as git would commit it, untracked files included; "none" outside
+/// a repository. Uses a throw-away index so the user's staging area is never touched.
+fn worktree_hash() -> String {
+    let top = match Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+    {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        _ => return "none".into(),
+    };
+    let index = std::env::temp_dir().join(format!("sw-index-{}", std::process::id()));
+    let _ = fs::remove_file(&index);
+    let added = Command::new("git")
+        .env("GIT_INDEX_FILE", &index)
+        .args(["add", "-A", "--", "."])
+        .current_dir(&top)
+        .output();
+    let tree = match added {
+        Ok(out) if out.status.success() => Command::new("git")
+            .env("GIT_INDEX_FILE", &index)
+            .arg("write-tree")
+            .current_dir(&top)
+            .output(),
+        _ => {
+            let _ = fs::remove_file(&index);
+            return "none".into();
+        }
+    };
+    let _ = fs::remove_file(&index);
+    match tree {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        _ => "none".into(),
+    }
+}
+
+fn shell(cmd: &str) -> Result<std::process::Output> {
+    let result = if cfg!(windows) {
+        Command::new("cmd").args(["/C", cmd]).output()
+    } else {
+        // bash for pipefail (a failing command inside a pipe must fail the check); sh if absent
+        match Command::new("bash")
+            .args(["-o", "pipefail", "-c", cmd])
+            .output()
+        {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Command::new("sh").args(["-c", cmd]).output()
+            }
+            other => other,
+        }
+    };
+    result.map_err(|e| format!("cannot run the check: {e}"))
+}
+
+fn log_events(run: &Path) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    fs::read_to_string(run.join("log.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+fn event_is(event: &serde_json::Map<String, serde_json::Value>, key: &str, value: &str) -> bool {
+    event.get(key).map(value_str).as_deref() == Some(value)
+}
+
+/// Frozen paths and their hashes; a later freeze of the same path replaces the earlier one.
+fn frozen_files(run: &Path) -> BTreeMap<String, String> {
+    let mut files = BTreeMap::new();
+    for event in log_events(run) {
+        if !event_is(&event, "event", "freeze") {
+            continue;
+        }
+        if let Some(serde_json::Value::Object(map)) = event.get("files") {
+            for (path, hash) in map {
+                files.insert(path.clone(), value_str(hash));
+            }
+        }
+    }
+    files
+}
+
+fn latest_receipt(run: &Path, step: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    log_events(run)
+        .into_iter()
+        .rev()
+        .find(|e| event_is(e, "event", "receipt") && event_is(e, "step", step))
+}
+
+fn step_command(run: &Path, step: &str) -> Result<String> {
+    let plan = fs::read_to_string(run.join("plan.md"))
+        .map_err(|_| format!("{} has no plan.md yet", file_name(run)))?;
+    let check =
+        plan_step_check(&plan, step).ok_or_else(|| format!("step {step} is not in plan.md"))?;
+    command_check(&check).map(str::to_string).ok_or_else(|| {
+        format!(
+            "step {step}'s check is not a command; write it as `check: $ <command>` so sw can run it"
+        )
+    })
+}
+
+fn run_check(run: &Path, step: &str) -> Result<()> {
+    let cmd = step_command(run, step)?;
+    let mut event = serde_json::Map::new();
+    event.insert("event".into(), "receipt".into());
+    event.insert("step".into(), step.into());
+    event.insert("cmd".into(), cmd.clone().into());
+    let tampered: Vec<String> = frozen_files(run)
+        .iter()
+        .filter(|(path, hash)| content_hash(Path::new(path)).ok().as_deref() != Some(hash))
+        .map(|(path, _)| path.clone())
+        .collect();
+    if !tampered.is_empty() {
+        let list = tampered.join(", ");
+        event.insert("tampered".into(), tampered.into());
+        event.insert("result".into(), "fail".into());
+        append_json(run, event)?;
+        return Err(format!(
+            "step {step}: tampered: {list} changed since it was frozen, so the check did not run. \
+             If the change is intended, run `sw run freeze` again; the log keeps both."
+        ));
+    }
+    let started = Instant::now();
+    let output = shell(&cmd)?;
+    let secs = started.elapsed().as_secs_f64();
+    let code = output.status.code().unwrap_or(-1);
+    let mut text = output.stdout;
+    if !output.stderr.is_empty() {
+        text.extend_from_slice(b"--- stderr ---\n");
+        text.extend_from_slice(&output.stderr);
+    }
+    let checks = run.join("checks");
+    fs::create_dir_all(&checks).map_err(|e| e.to_string())?;
+    let stamp = now().replace([':', 'T'], "");
+    let mut log_path = checks.join(format!("{step}-{stamp}.log"));
+    let mut n = 1;
+    while log_path.exists() {
+        n += 1;
+        log_path = checks.join(format!("{step}-{stamp}-{n}.log"));
+    }
+    fs::write(&log_path, &text).map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
+    let tree = worktree_hash();
+    event.insert("exit".into(), code.into());
+    event.insert("ok".into(), (code == 0).into());
+    event.insert("secs".into(), ((secs * 10.0).round() / 10.0).into());
+    event.insert(
+        "out_sha256".into(),
+        format!("{:x}", Sha256::digest(&text)).into(),
+    );
+    event.insert("log".into(), file_name(&log_path).into());
+    event.insert("tree".into(), tree.clone().into());
+    if code != 0 {
+        event.insert("result".into(), "fail".into());
+    }
+    append_json(run, event)?;
+    if code == 0 {
+        println!(
+            "step {step}: check passed (exit 0, {secs:.1}s, tree {}); `sw run done` when the step's work is complete",
+            short(&tree)
+        );
+        Ok(())
+    } else {
+        Err(format!(
+            "step {step}: check failed (exit {code}); output in {}",
+            log_path.display()
+        ))
+    }
+}
+
+fn short(hash: &str) -> &str {
+    if hash.len() > 12 {
+        &hash[..12]
+    } else {
+        hash
+    }
+}
+
+fn run_done(run: &Path, step: &str) -> Result<()> {
+    let cmd = step_command(run, step)?;
+    let receipt = latest_receipt(run, step)
+        .ok_or_else(|| format!("step {step}: no receipt; run `sw run check <run> {step}` first"))?;
+    if receipt.get("ok") != Some(&serde_json::Value::Bool(true)) {
+        return Err(format!(
+            "step {step}: the last check failed or was tampered; fix it and run `sw run check` again"
+        ));
+    }
+    let then = receipt.get("tree").map(value_str).unwrap_or_default();
+    let tree = worktree_hash();
+    if then != tree {
+        return Err(format!(
+            "step {step}: stale receipt: the working tree changed since the check (was {}, now {}); run `sw run check` again",
+            short(&then),
+            short(&tree)
+        ));
+    }
+    let mut event = serde_json::Map::new();
+    event.insert("step".into(), step.into());
+    event.insert("result".into(), "pass".into());
+    event.insert("certified".into(), true.into());
+    event.insert("check".into(), cmd.clone().into());
+    event.insert("tree".into(), tree.clone().into());
+    if let Some(ts) = receipt.get("ts") {
+        event.insert("receipt".into(), ts.clone());
+    }
+    append_json(run, event)?;
+    println!(
+        "step {step}: done, certified (`{cmd}` exit 0 on tree {})",
+        short(&tree)
+    );
+    Ok(())
+}
+
+fn run_freeze(run: &Path, paths: &[String]) -> Result<()> {
+    let mut files = serde_json::Map::new();
+    for path in paths {
+        let hash =
+            content_hash(Path::new(path)).map_err(|e| format!("cannot freeze {path}: {e}"))?;
+        files.insert(path.clone(), hash.into());
+    }
+    let mut event = serde_json::Map::new();
+    event.insert("event".into(), "freeze".into());
+    event.insert("files".into(), files.into());
+    append_json(run, event)?;
+    println!(
+        "frozen: {}; any change fails the step's check until frozen again",
+        paths.join(", ")
+    );
+    Ok(())
 }
 
 fn slugify(text: &str) -> String {
@@ -1011,7 +1310,27 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                     None => return Err(format!("expected key=value, got '{pair}'")),
                 }
             }
-            append_event(&store.resolve_run(&run)?, &parsed)?;
+            let dir = store.resolve_run(&run)?;
+            let value = |key: &str| {
+                parsed
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.clone())
+            };
+            if let (Some(step), Some(result)) = (value("step"), value("result")) {
+                let plan = fs::read_to_string(dir.join("plan.md")).unwrap_or_default();
+                let is_command = plan_step_check(&plan, &step)
+                    .as_deref()
+                    .and_then(command_check)
+                    .is_some();
+                if result == "pass" && is_command {
+                    return Err(format!(
+                        "step {step} has a command check; a pass written by hand is not evidence. \
+                         Run `sw run check {run} {step}`, then `sw run done {run} {step}`."
+                    ));
+                }
+            }
+            append_event(&dir, &parsed)?;
         }
         RunCmd::Status { run } => {
             let dir = store.resolve_run(&run)?;
@@ -1038,6 +1357,9 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             }
         }
         RunCmd::Cost { run } => run_cost(store, &store.resolve_run(&run)?)?,
+        RunCmd::Check { run, step } => run_check(&store.resolve_run(&run)?, &step)?,
+        RunCmd::Done { run, step } => run_done(&store.resolve_run(&run)?, &step)?,
+        RunCmd::Freeze { run, paths } => run_freeze(&store.resolve_run(&run)?, &paths)?,
     }
     Ok(())
 }
@@ -1352,6 +1674,27 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn step_checks_are_found_and_commands_recognised() {
+        let plan = "# Goal\n1. a | who: self | check: $ cargo test | after: -\n2. b | check: reviewer reads it\n";
+        assert_eq!(plan_step_check(plan, "1").as_deref(), Some("$ cargo test"));
+        assert_eq!(command_check("$ cargo test"), Some("cargo test"));
+        assert_eq!(
+            plan_step_check(plan, "2").as_deref(),
+            Some("reviewer reads it")
+        );
+        assert_eq!(command_check("reviewer reads it"), None);
+        assert_eq!(command_check("$"), None);
+        assert_eq!(plan_step_check(plan, "3"), None);
+        let piped =
+            "1. a | who: self | check: $ ls | wc -l | grep -q 2 | after: -\n2. b | check: $ true\n";
+        assert_eq!(
+            plan_step_check(piped, "1").as_deref(),
+            Some("$ ls | wc -l | grep -q 2")
+        );
+        assert_eq!(plan_step_check(piped, "2").as_deref(), Some("$ true"));
+    }
 
     #[test]
     fn steps_need_a_check() {

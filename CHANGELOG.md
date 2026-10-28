@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- Certificates: a step whose check is `check: $ <command>` is proven, not claimed. `sw run check` runs the command (bash with pipefail, so a failure inside a pipe fails) and writes a receipt: command, exit code, output hash, output file under `checks/`, hash of the working tree as git would commit it (untracked files included). `sw run done` passes the step only with a passing receipt taken on the working tree as it is now; `sw run log … result=pass` is refused for such steps. `sw run freeze <paths>` records the hashes of test and script files; any later change fails the check as tampered until they are frozen again, and both freezes stay in the log. The stillwright skill now writes checks as commands.
+
 ## 0.1.5 - 2026-10-26
 - `sw run cost` (dollars per run from logged tokens at `prices.json` rates) and `sw cache` (names the turns that broke the prompt cache in a Claude Code transcript).
 - Cost rules in the stillwright skill, `sw-worker` forked small-model skill, docs/cost.md, docs/prices.example.json, and the A/B cost harness docs/evals/run_eval.py; priced eval round in docs/evals.md (no saving on small tasks, stated as such).

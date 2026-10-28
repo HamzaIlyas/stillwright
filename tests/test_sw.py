@@ -393,5 +393,119 @@ class CacheTests(SwTestCase):
             self.sw("cache", str(p))
 
 
+class CertificateTests(SwTestCase):
+    """A step with a `$` check is done only with a receipt that is still fresh (mechanism 1)."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        self.work.mkdir()
+        git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run([*git, "init", "-q"], cwd=self.work, check=True)
+        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], cwd=self.work, check=True)
+        (self.work / "tests").mkdir()
+        (self.work / "tests" / "t.sh").write_text("exit 0\n")
+        self.run = pathlib.Path(self.sw("run", "new", "cert").strip())
+        (self.run / "plan.md").write_text(
+            "# Goal: x\n1. a | check: $ sh tests/t.sh\n2. b | check: reviewer reads it\nOutward: none\n"
+        )
+
+    def events(self):
+        return [json.loads(l) for l in (self.run / "log.jsonl").read_text().splitlines() if l.strip()]
+
+    def receipts(self, step="1"):
+        return [e for e in self.events() if e.get("event") == "receipt" and e.get("step") == step]
+
+    def test_check_runs_the_command_and_writes_a_receipt(self):
+        out = self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("pass", out)
+        receipt = self.receipts()[-1]
+        self.assertEqual(receipt["cmd"], "sh tests/t.sh")
+        self.assertEqual(receipt["exit"], 0)
+        self.assertEqual(len(receipt["tree"]), 40)
+        self.assertEqual(len(receipt["out_sha256"]), 64)
+        logs = list((self.run / "checks").glob("1-*.log"))
+        self.assertEqual(len(logs), 1)
+        # a passing check is not yet "done": the step still needs sw run done
+        self.assertIn("next: step 1", self.sw("run", "status"))
+
+    def test_failing_check_is_logged_and_exits_nonzero(self):
+        (self.work / "tests" / "t.sh").write_text("echo boom; exit 3\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("exit 3", str(cm.exception))
+        self.assertEqual(self.receipts()[-1]["result"], "fail")
+        self.assertIn("step 1: fail", self.sw("run", "status"))
+
+    def test_a_failure_inside_a_pipe_fails_the_check(self):
+        (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $ false | cat\n")
+        with self.assertRaises(Failed):
+            self.sw("run", "check", "latest", "1", cwd=self.work)
+
+    def test_pass_claim_without_a_receipt_is_refused(self):
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "log", "latest", "step=1", "result=pass")
+        self.assertIn("sw run check", str(cm.exception))
+        self.assertEqual(self.events(), [])
+        # a step whose check is not a command may still be logged (reviewer path)
+        self.sw("run", "log", "latest", "step=2", "result=pass")
+
+    def test_done_needs_a_receipt_from_the_current_worktree(self):
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("no receipt", str(cm.exception))
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.work / "new.txt").write_text("edited after the check\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("stale", str(cm.exception))
+        self.assertIn("next: step 1", self.sw("run", "status"))
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+        done = self.events()[-1]
+        self.assertEqual((done["step"], done["result"], done["certified"]), ("1", "pass", True))
+        self.assertIn("next: step 2", self.sw("run", "status"))
+
+    def test_done_refuses_a_failed_receipt(self):
+        (self.work / "tests" / "t.sh").write_text("exit 1\n")
+        with self.assertRaises(Failed):
+            self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("fail", str(cm.exception))
+
+    def test_frozen_check_files_detect_tampering(self):
+        self.sw("run", "freeze", "latest", "tests", cwd=self.work)
+        self.assertEqual(list(self.events()[-1]["files"]), ["tests"])
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.work / "tests" / "t.sh").write_text("exit 0 # weakened\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("tamper", str(cm.exception))
+        self.assertEqual(self.receipts()[-1]["tampered"], ["tests"])
+        self.assertEqual(self.receipts()[-1]["result"], "fail")
+        with self.assertRaises(Failed):
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        # an explicit re-freeze is the only way on, and it stays in the log
+        self.sw("run", "freeze", "latest", "tests", cwd=self.work)
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_pipes_inside_a_check_are_kept(self):
+        (self.run / "plan.md").write_text(
+            "# Goal: x\n1. a | who: self | check: $ printf 'x\\ny\\n' | wc -l | grep -q 2 | after: -\n"
+        )
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertEqual(self.receipts()[-1]["cmd"], "printf 'x\\ny\\n' | wc -l | grep -q 2")
+
+    def test_check_outside_git_still_works(self):
+        plain = pathlib.Path(self.tmp.name) / "plain"
+        plain.mkdir()
+        (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $ true\n")
+        self.sw("run", "check", "latest", "1", cwd=plain)
+        self.assertEqual(self.receipts()[-1]["tree"], "none")
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=plain))
+
+
 if __name__ == "__main__":
     unittest.main()
