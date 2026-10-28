@@ -167,7 +167,8 @@ fn split_commands(line: &str) -> Vec<Vec<String>> {
             }
             None => match c {
                 '\'' | '"' => quote = Some(c),
-                '\\' => {
+                // A backslash escapes in POSIX shells; on Windows it separates path parts.
+                '\\' if !cfg!(windows) => {
                     if let Some(next) = chars.next() {
                         word.push(next);
                     }
