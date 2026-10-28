@@ -1224,8 +1224,28 @@ fn runnable_steps(plan: &str, results: &BTreeMap<String, String>) -> Vec<String>
 }
 
 /// What must survive a compaction: goal, must-nots, outward line, the next step and its check.
+/// The folder a run was started from, recorded by `sw run new`.
+fn run_cwd(run: &Path) -> Option<String> {
+    log_events(run)
+        .ok()?
+        .into_iter()
+        .find(|e| event_is(e, "event", "start"))
+        .and_then(|e| e.get("cwd").map(value_str))
+}
+
 fn run_brief(store: &Store) -> Result<()> {
-    let Some(dir) = store.runs()?.last().cloned() else {
+    // The newest open run started in this folder (or a parent or child of it): a run from
+    // another project must not leak into this session's context.
+    let here = std::env::current_dir()
+        .ok()
+        .and_then(|d| fs::canonicalize(d).ok())
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let open = store.runs()?.into_iter().rev().find(|dir| {
+        let same_place = run_cwd(dir).is_some_and(|c| here.starts_with(&c) || c.starts_with(&here));
+        same_place && Progress::of(dir).next.is_some()
+    });
+    let Some(dir) = open else {
         return Ok(());
     };
     let plan = fs::read_to_string(dir.join("plan.md")).unwrap_or_default();
@@ -1233,25 +1253,38 @@ fn run_brief(store: &Store) -> Result<()> {
     let Some(next) = progress.next.clone() else {
         return Ok(());
     };
+    let clip = |s: &str| -> String {
+        let mut t: String = s.chars().take(240).collect();
+        if t.len() < s.len() {
+            t.push('…');
+        }
+        t
+    };
     println!(
         "Stillwright run {} ({}/{} steps passed)",
         file_name(&dir),
         progress.passed(),
         progress.total()
     );
+    let mut lines = 0;
     for line in plan.lines() {
         let l = line.trim();
+        if lines >= 8 {
+            break;
+        }
         if let Some(goal) = l.strip_prefix("# Goal:") {
-            println!("Goal: {}", goal.trim());
+            println!("Goal: {}", clip(goal.trim()));
+            lines += 1;
         } else if l.to_lowercase().starts_with("must not:")
             || l.to_lowercase().starts_with("never:")
             || l.starts_with("Outward:")
         {
-            println!("{l}");
+            println!("{}", clip(l));
+            lines += 1;
         }
     }
     if let Some(line) = plan_step_line(&plan, &next) {
-        println!("Next: step {next}: {line}");
+        println!("Next: step {next}: {}", clip(&line));
     }
     if plan_step_check(&plan, &next)
         .as_deref()
@@ -1657,12 +1690,18 @@ fn gate_cmd(args: GateArgs) -> Result<()> {
         std::io::stdin()
             .read_to_string(&mut input)
             .map_err(|e| format!("cannot read the hook event: {e}"))?;
-        let event: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
-        let command = event
+        let input = input.trim_start_matches('\u{feff}');
+        let event: serde_json::Value = serde_json::from_str(input).unwrap_or_default();
+        let Some(command) = event
             .pointer("/tool_input/command")
             .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
+            .map(str::to_string)
+        else {
+            // Fail open: a PreToolUse hook that errors would block every command, and a
+            // broken event is the host's bug; say so where the log can see it.
+            eprintln!("warning: sw gate --hook: no tool_input.command in the event; allowed");
+            return Ok(());
+        };
         let cwd = event.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from);
         (command, args.workspace.or(cwd))
     } else {
@@ -1683,9 +1722,22 @@ fn gate_cmd(args: GateArgs) -> Result<()> {
             .join(" ");
         (line, args.workspace)
     };
+    // Where the command runs, and what it may touch: the repository the directory is in,
+    // or the directory itself outside git. `--workspace` overrides.
+    let cwd = match &workspace {
+        Some(w) => w.clone(),
+        None => std::env::current_dir().map_err(|e| e.to_string())?,
+    };
     let workspace = match workspace {
         Some(w) => w,
-        None => std::env::current_dir().map_err(|e| e.to_string())?,
+        None => Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&cwd)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()))
+            .unwrap_or_else(|| cwd.clone()),
     };
     // The user's own rules: the state folder's guards.md, then the workspace's.
     let mut guards = Vec::new();
@@ -1698,7 +1750,7 @@ fn gate_cmd(args: GateArgs) -> Result<()> {
             guards.extend(gate::parse_guards(&text));
         }
     }
-    let decision = gate::judge_with_guards(&command, &workspace, &guards);
+    let decision = gate::judge_with_guards(&command, &workspace, &cwd, &guards);
     if args.hook {
         // Only destructive commands get a word; everything else stays silent and allowed.
         let permission = match decision.verdict {
@@ -1776,23 +1828,58 @@ fn route_stats(store: &Store) -> Result<BTreeMap<(String, String), RouteStat>> {
     };
     let mut stats: BTreeMap<(String, String), RouteStat> = BTreeMap::new();
     for run in store.runs()? {
+        // One row per step, from every event about it: a certified `done`, a cost line and a
+        // retry all describe the same step. Steps with no result yet are left out.
+        let plan = fs::read_to_string(run.join("plan.md")).unwrap_or_default();
+        #[allow(clippy::type_complexity)]
+        let mut steps: BTreeMap<
+            String,
+            (
+                Option<String>,
+                Option<String>,
+                f64,
+                f64,
+                bool,
+                Option<String>,
+            ),
+        > = BTreeMap::new();
         for e in log_events(&run)? {
-            let (Some(who), Some(model), Some(result)) = (
-                e.get("who").map(value_str),
-                e.get("model").map(value_str),
-                e.get("result").map(value_str),
-            ) else {
+            let Some(step) = e.get("step").map(value_str) else {
                 continue;
             };
-            if e.get("step").is_none() {
-                continue;
+            let entry = steps
+                .entry(step.clone())
+                .or_insert((None, None, 0.0, 0.0, false, None));
+            if let Some(who) = e.get("who").map(value_str) {
+                entry.0 = Some(who);
             }
-            let num = |k: &str| {
-                e.get(k)
-                    .map(value_str)
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .unwrap_or(0.0)
-            };
+            if let Some(model) = e.get("model").map(value_str) {
+                entry.1 = Some(model);
+            }
+            let num = |k: &str| e.get(k).map(value_str).and_then(|v| v.parse::<f64>().ok());
+            if let (Some(i), Some(o)) = (num("in"), num("out")) {
+                entry.2 += i;
+                entry.3 += o;
+                entry.4 = true;
+            }
+            if let Some(result) = e.get("result").map(value_str) {
+                entry.5 = Some(result);
+            }
+        }
+        for (step, (who, model, input, output, tokens_logged, result)) in steps {
+            let Some(result) = result else { continue };
+            let who = who
+                .or_else(|| {
+                    plan_step_line(&plan, &step).and_then(|l| {
+                        l.split('|').find_map(|p| {
+                            p.trim_start()
+                                .strip_prefix("who:")
+                                .map(|w| w.trim().to_string())
+                        })
+                    })
+                })
+                .unwrap_or_else(|| "(no route)".into());
+            let model = model.unwrap_or_else(|| "(no model logged)".into());
             let stat = stats.entry((who, model.clone())).or_insert(RouteStat {
                 steps: 0,
                 passed: 0,
@@ -1804,10 +1891,10 @@ fn route_stats(store: &Store) -> Result<BTreeMap<(String, String), RouteStat>> {
                 stat.passed += 1;
             }
             match lookup(&prices, &model) {
-                Some(p) => {
-                    stat.dollars += (num("in") * p.input + num("out") * p.output) / 1_000_000.0
+                Some(p) if tokens_logged => {
+                    stat.dollars += (input * p.input + output * p.output) / 1_000_000.0
                 }
-                None => stat.priced = false,
+                _ => stat.priced = false,
             }
         }
     }
@@ -1892,9 +1979,12 @@ fn lesson_in_force(l: &Lesson) -> bool {
         .unwrap_or(false)
 }
 
+/// Lessons from tool or web output stay quarantined until a person trusts them.
 fn lesson_quarantined(l: &Lesson) -> bool {
-    matches!(l.source.as_str(), "tool" | "web")
+    (l.source.starts_with("tool") || l.source.starts_with("web")) && !l.source.ends_with("trusted")
 }
+
+const LESSON_SOURCES: &[&str] = &["self", "reviewer", "user", "tool", "web"];
 
 fn lesson_line(l: &Lesson, marks: bool) -> String {
     let mut flags = String::new();
@@ -1922,12 +2012,26 @@ fn lesson(store: &Store, cmd: LessonCmd) -> Result<()> {
             run,
             days,
         } => {
+            let source = source.trim().to_lowercase();
+            if !LESSON_SOURCES.contains(&source.as_str()) {
+                return Err(format!(
+                    "--source must be one of {}",
+                    LESSON_SOURCES.join(", ")
+                ));
+            }
+            let scope = scope.trim().to_lowercase();
+            if scope.is_empty() {
+                return Err("--scope cannot be empty (use `global`)".into());
+            }
+            if !(1..=3650).contains(&days) {
+                return Err("--days must be between 1 and 3650".into());
+            }
             let id = next_id(lessons.iter().map(|l| l.id));
             let quarantined = matches!(source.as_str(), "tool" | "web");
             lessons.push(Lesson {
                 id,
                 text,
-                scope: scope.to_lowercase(),
+                scope,
                 source,
                 run,
                 helpful: 0,
@@ -1968,7 +2072,10 @@ fn lesson(store: &Store, cmd: LessonCmd) -> Result<()> {
             println!("lesson {id}: +{helpful}/-{harmful}");
         }
         LessonCmd::Trust { id } => {
-            find(&mut lessons, id, |l| l.id)?.source = "user".into();
+            let l = find(&mut lessons, id, |l| l.id)?;
+            if !l.source.ends_with("trusted") {
+                l.source = format!("{}, trusted", l.source);
+            }
             store.save("lessons.json", &lessons)?;
             println!("lesson {id} trusted");
         }
@@ -2113,12 +2220,19 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             fs::create_dir_all(&dir)
                 .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
             File::create(dir.join("log.jsonl")).map_err(|e| e.to_string())?;
-            if let Some(goal) = goal {
+            let cwd = std::env::current_dir()
+                .ok()
+                .and_then(|d| fs::canonicalize(d).ok())
+                .map(|d| d.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            {
+                let goal = goal.map(|g| g.to_string()).unwrap_or_default();
                 append_event(
                     &dir,
                     &[
                         ("event".into(), "start".into()),
-                        ("goal".into(), goal.to_string()),
+                        ("cwd".into(), cwd),
+                        ("goal".into(), goal),
                     ],
                 )?;
             }
@@ -2300,7 +2414,12 @@ fn inbox(store: &Store, cmd: InboxCmd) -> Result<()> {
             body,
             run,
         } => {
-            let run = run.unwrap_or_default();
+            // One name per run (`latest`, an id or a path all mean the same folder), so the
+            // question budget cannot be dodged by spelling the run differently.
+            let run = match run.filter(|r| !r.is_empty()) {
+                Some(r) => store.resolve_run(&r).map(|d| file_name(&d)).unwrap_or(r),
+                None => String::new(),
+            };
             if matches!(kind, Kind::Ask) {
                 // Question budget: more questions do not get more answers (Ask Less, Ask
                 // Better; Ask Early, Ask Late, Ask Right). Three open per run, then act on
