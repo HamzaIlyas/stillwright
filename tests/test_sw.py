@@ -476,13 +476,14 @@ class CertificateTests(SwTestCase):
 
     def test_frozen_check_files_detect_tampering(self):
         self.sw("run", "freeze", "latest", "tests", cwd=self.work)
-        self.assertEqual(list(self.events()[-1]["files"]), ["tests"])
+        frozen = os.path.realpath(self.work / "tests")
+        self.assertEqual(list(self.events()[-1]["files"]), [frozen])
         self.sw("run", "check", "latest", "1", cwd=self.work)
         (self.work / "tests" / "t.sh").write_text("exit 0 # weakened\n")
         with self.assertRaises(Failed) as cm:
             self.sw("run", "check", "latest", "1", cwd=self.work)
         self.assertIn("tamper", str(cm.exception))
-        self.assertEqual(self.receipts()[-1]["tampered"], ["tests"])
+        self.assertEqual(self.receipts()[-1]["tampered"], [frozen])
         self.assertEqual(self.receipts()[-1]["result"], "fail")
         with self.assertRaises(Failed):
             self.sw("run", "done", "latest", "1", cwd=self.work)
@@ -497,6 +498,76 @@ class CertificateTests(SwTestCase):
         )
         self.sw("run", "check", "latest", "1", cwd=self.work)
         self.assertEqual(self.receipts()[-1]["cmd"], "printf 'x\\ny\\n' | wc -l | grep -q 2")
+
+    def test_duplicate_keys_in_log_are_refused(self):
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "log", "latest", "step=1", "result=fail", "result=pass")
+        self.assertIn("duplicate", str(cm.exception))
+        with self.assertRaises(Failed):
+            self.sw("run", "log", "latest", "step=2", "step=1", "result=pass")
+        self.assertEqual(self.events(), [])
+
+    def test_done_refuses_when_the_plan_command_changed(self):
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        plan = (self.run / "plan.md").read_text().replace("$ sh tests/t.sh", "$ true")
+        (self.run / "plan.md").write_text(plan)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("plan", str(cm.exception))
+
+    def test_prose_check_starting_with_a_dollar_sign_is_not_a_command(self):
+        (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $5 refund shown\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("not a command", str(cm.exception))
+        self.sw("run", "log", "latest", "step=1", "result=pass")
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "needs a file git cannot read")
+    def test_git_failure_inside_a_repo_is_an_error_not_a_pass(self):
+        locked = self.work / "locked.txt"
+        locked.write_text("x")
+        locked.chmod(0)
+        try:
+            with self.assertRaises(Failed) as cm:
+                self.sw("run", "check", "latest", "1", cwd=self.work)
+            self.assertIn("git", str(cm.exception))
+            self.assertEqual(self.receipts(), [])
+        finally:
+            locked.chmod(0o644)
+
+    def test_state_folder_inside_the_repo_does_not_make_receipts_stale(self):
+        self.env["STILLWRIGHT_HOME"] = str(self.work / ".swh")
+        run = pathlib.Path(self.sw("run", "new", "inside").strip())
+        (run / "plan.md").write_text("# Goal: x\n1. a | check: $ sh tests/t.sh\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_frozen_paths_are_absolute_so_the_directory_does_not_matter(self):
+        self.sw("run", "freeze", "latest", "tests", cwd=self.work)
+        sub = self.work / "sub"
+        sub.mkdir()
+        (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $ sh ../tests/t.sh\n")
+        self.sw("run", "check", "latest", "1", cwd=sub)
+        (self.work / "tests" / "t.sh").write_text("exit 0 # changed\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "check", "latest", "1", cwd=sub)
+        self.assertIn("tamper", str(cm.exception))
+
+    def test_done_also_detects_tampering(self):
+        self.sw("run", "freeze", "latest", "tests", cwd=self.work)
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.work / "tests" / "t.sh").write_text("exit 0 # after the check\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("tamper", str(cm.exception))
+
+    def test_check_writes_no_objects_into_the_repo(self):
+        def objects():
+            return subprocess.run(["git", "count-objects"], cwd=self.work, capture_output=True, text=True).stdout
+        (self.work / "new.txt").write_text("new\n")
+        before = objects()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertEqual(objects(), before)
 
     def test_check_outside_git_still_works(self):
         plain = pathlib.Path(self.tmp.name) / "plain"
