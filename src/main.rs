@@ -9,7 +9,9 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read as _, Write};
+
+mod gate;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Instant;
@@ -163,6 +165,30 @@ enum Cmd {
         /// Path to the session .jsonl (Claude Code keeps them under ~/.claude/projects/)
         file: PathBuf,
     },
+    /// Judge a shell command before it runs: allow (exit 0), ask (3) or block (2), with the
+    /// resolved paths and the blast radius. `--hook` speaks Claude Code's PreToolUse JSON.
+    Gate(GateArgs),
+    /// The cheapest model that passes for a route (`who:` in plans), from logged results
+    Route { who: String },
+    /// Lessons learned, with provenance, votes, scope and expiry
+    #[command(subcommand)]
+    Lesson(LessonCmd),
+}
+
+#[derive(clap::Args)]
+struct GateArgs {
+    /// Print the decision as JSON
+    #[arg(long)]
+    json: bool,
+    /// Read a PreToolUse event on stdin and answer with a permission decision
+    #[arg(long)]
+    hook: bool,
+    /// The folder the command may touch (default: the current directory)
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+    /// The command line to judge
+    #[arg(trailing_var_arg = true)]
+    command: Vec<String>,
 }
 
 #[derive(clap::Args)]
@@ -249,7 +275,74 @@ enum RunCmd {
         run: String,
         step: String,
     },
+    /// The goal, the must-nots and the next step of the open run, in a few lines: what must
+    /// survive a context compaction. Prints nothing when no run is open.
+    Brief,
+    /// Steps that can start now: not passed yet, and every step in their `after:` passed.
+    Next {
+        #[arg(default_value = "latest")]
+        run: String,
+    },
+    /// Across all runs: steps, pass rate and dollars per passed step for each (who, model)
+    Stats,
 }
+
+#[derive(Subcommand)]
+enum LessonCmd {
+    /// Record a lesson with where it came from
+    Add {
+        text: String,
+        /// `global`, or a word from the goals it applies to (a failure lesson stays scoped)
+        #[arg(long, default_value = "global")]
+        scope: String,
+        /// self | reviewer | user | tool | web (tool and web are quarantined until trusted)
+        #[arg(long, default_value = "self")]
+        source: String,
+        #[arg(long, default_value = "")]
+        run: String,
+        /// Days until it expires unless a vote renews it
+        #[arg(long, default_value_t = 90)]
+        days: i64,
+    },
+    /// Lessons in force (`--all`: expired and quarantined too)
+    List {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Mark a lesson helpful (`up`, also renews it) or harmful (`down`) after a step used it
+    Vote { id: u64, direction: String },
+    /// Take a tool- or web-sourced lesson out of quarantine
+    Trust { id: u64 },
+    /// The few lessons that apply to a goal, best first
+    For {
+        goal: String,
+        #[arg(long)]
+        all: bool,
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Lesson {
+    id: u64,
+    text: String,
+    scope: String,
+    source: String,
+    #[serde(default)]
+    run: String,
+    #[serde(default)]
+    helpful: u32,
+    #[serde(default)]
+    harmful: u32,
+    created: String,
+    valid_until: String,
+}
+
+/// Open questions allowed per run.
+const ASK_BUDGET: usize = 3;
+/// Days a vote up adds to a lesson's life.
+const LESSON_RENEWAL_DAYS: i64 = 90;
 
 #[derive(Subcommand)]
 enum InboxCmd {
@@ -1091,6 +1184,85 @@ fn run_done(run: &Path, step: &str) -> Result<()> {
     Ok(())
 }
 
+/// The full line of one step, without its number.
+fn plan_step_line(plan: &str, step: &str) -> Option<String> {
+    plan.lines().find_map(|line| {
+        let digits: String = line.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let rest = &line[digits.len()..];
+        (digits == step && rest.starts_with('.')).then(|| rest[1..].trim().to_string())
+    })
+}
+
+/// The step numbers listed in a step's `after:` field (`-` or none means no dependencies).
+fn step_after(plan: &str, step: &str) -> Vec<String> {
+    plan_step_line(plan, step)
+        .and_then(|line| {
+            line.split('|').find_map(|part| {
+                part.trim_start()
+                    .strip_prefix("after:")
+                    .map(|a| a.trim().to_string())
+            })
+        })
+        .map(|after| {
+            after
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|s| !s.is_empty() && *s != "-")
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Steps not yet passed whose dependencies all passed.
+fn runnable_steps(plan: &str, results: &BTreeMap<String, String>) -> Vec<String> {
+    let passed = |s: &str| results.get(s).map(String::as_str) == Some("pass");
+    plan_steps(plan)
+        .into_iter()
+        .filter(|s| !passed(s))
+        .filter(|s| step_after(plan, s).iter().all(|d| passed(d)))
+        .collect()
+}
+
+/// What must survive a compaction: goal, must-nots, outward line, the next step and its check.
+fn run_brief(store: &Store) -> Result<()> {
+    let Some(dir) = store.runs()?.last().cloned() else {
+        return Ok(());
+    };
+    let plan = fs::read_to_string(dir.join("plan.md")).unwrap_or_default();
+    let progress = Progress::of(&dir);
+    let Some(next) = progress.next.clone() else {
+        return Ok(());
+    };
+    println!(
+        "Stillwright run {} ({}/{} steps passed)",
+        file_name(&dir),
+        progress.passed(),
+        progress.total()
+    );
+    for line in plan.lines() {
+        let l = line.trim();
+        if let Some(goal) = l.strip_prefix("# Goal:") {
+            println!("Goal: {}", goal.trim());
+        } else if l.to_lowercase().starts_with("must not:")
+            || l.to_lowercase().starts_with("never:")
+            || l.starts_with("Outward:")
+        {
+            println!("{l}");
+        }
+    }
+    if let Some(line) = plan_step_line(&plan, &next) {
+        println!("Next: step {next}: {line}");
+    }
+    if plan_step_check(&plan, &next)
+        .as_deref()
+        .and_then(command_check)
+        .is_some()
+    {
+        println!("Prove it with `sw run check latest {next}` then `sw run done latest {next}`; a pass by hand is refused.");
+    }
+    Ok(())
+}
+
 fn run_freeze(run: &Path, paths: &[String]) -> Result<()> {
     let mut files = serde_json::Map::new();
     for path in paths {
@@ -1400,6 +1572,38 @@ fn enable_in_settings(path: &Path) -> Result<bool> {
     } else {
         plugins.insert(key, serde_json::Value::Bool(true));
     }
+    if path.ends_with(Path::new(".claude").join("settings.json")) {
+        // Claude Code hooks: the gate before every shell command, the brief after compaction.
+        let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
+        if !hooks.is_object() {
+            return Err(format!("{}: hooks is not an object", path.display()));
+        }
+        let hooks = hooks.as_object_mut().expect("checked");
+        for (event, matcher, command) in [
+            ("PreToolUse", "Bash", "sw gate --hook"),
+            ("SessionStart", "startup|resume|compact", "sw run brief"),
+        ] {
+            let list = hooks.entry(event).or_insert_with(|| serde_json::json!([]));
+            let Some(list) = list.as_array_mut() else {
+                return Err(format!("{}: hooks.{event} is not a list", path.display()));
+            };
+            let present = list.iter().any(|entry| {
+                entry
+                    .pointer("/hooks")
+                    .and_then(|h| h.as_array())
+                    .is_some_and(|h| {
+                        h.iter()
+                            .any(|x| x.get("command").and_then(|c| c.as_str()) == Some(command))
+                    })
+            });
+            if !present {
+                list.push(serde_json::json!({
+                    "matcher": matcher,
+                    "hooks": [{ "type": "command", "command": command, "timeout": 20 }]
+                }));
+            }
+        }
+    }
     if root == before {
         return Ok(false);
     }
@@ -1447,7 +1651,91 @@ fn init(args: InitArgs) -> Result<()> {
 
 // ---------------------------------------------------------------- commands
 
+fn gate_cmd(args: GateArgs) -> Result<()> {
+    let (command, workspace) = if args.hook {
+        let mut input = String::new();
+        std::io::stdin()
+            .read_to_string(&mut input)
+            .map_err(|e| format!("cannot read the hook event: {e}"))?;
+        let event: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
+        let command = event
+            .pointer("/tool_input/command")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let cwd = event.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from);
+        (command, args.workspace.or(cwd))
+    } else {
+        // Re-quote words with spaces so `sw gate -- bash -c "rm -rf x"` is judged as typed.
+        let line = args
+            .command
+            .iter()
+            .map(|w| {
+                if w.chars()
+                    .any(|c| c.is_whitespace() || c == '"' || c == '\'')
+                {
+                    format!("'{}'", w.replace('\'', "'\\''"))
+                } else {
+                    w.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        (line, args.workspace)
+    };
+    let workspace = match workspace {
+        Some(w) => w,
+        None => std::env::current_dir().map_err(|e| e.to_string())?,
+    };
+    // The user's own rules: the state folder's guards.md, then the workspace's.
+    let mut guards = Vec::new();
+    let mut files = vec![workspace.join(".stillwright").join("guards.md")];
+    if let Ok(root) = state_root() {
+        files.insert(0, root.join("guards.md"));
+    }
+    for file in files {
+        if let Ok(text) = fs::read_to_string(&file) {
+            guards.extend(gate::parse_guards(&text));
+        }
+    }
+    let decision = gate::judge_with_guards(&command, &workspace, &guards);
+    if args.hook {
+        // Only destructive commands get a word; everything else stays silent and allowed.
+        let permission = match decision.verdict {
+            gate::Verdict::Allow => return Ok(()),
+            gate::Verdict::Ask => "ask",
+            gate::Verdict::Block => "deny",
+        };
+        let out = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": permission,
+                "permissionDecisionReason": format!("stillwright gate: {}", gate::report(&decision).trim()),
+            }
+        });
+        println!("{out}");
+        return Ok(());
+    }
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&decision).map_err(|e| e.to_string())?
+        );
+    } else {
+        print!("{}", gate::report(&decision));
+    }
+    if decision.verdict == gate::Verdict::Allow {
+        Ok(())
+    } else {
+        std::process::exit(decision.verdict.exit_code().into());
+    }
+}
+
 fn run(cli: Cli) -> Result<()> {
+    if let Cmd::Gate(args) = cli.cmd {
+        // Runs on every shell command when wired as a hook: no state folder, no lock.
+        return gate_cmd(args);
+    }
     let store = Store::open()?;
     let _lock = store.lock()?;
     match cli.cmd {
@@ -1463,7 +1751,247 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Tool(cmd) => tool(&store, cmd),
         Cmd::Init(args) => init(args),
         Cmd::Cache { file } => cache_report(&store, &file),
+        Cmd::Gate(_) => unreachable!("handled before the store opens"),
+        Cmd::Route { who } => route(&store, &who),
+        Cmd::Lesson(cmd) => lesson(&store, cmd),
     }
+}
+
+// ---------------------------------------------------------------- stats and routing
+
+struct RouteStat {
+    steps: usize,
+    passed: usize,
+    dollars: f64,
+    priced: bool,
+}
+
+/// Per (who, model) across all runs: steps, passes and dollars, from logged step events.
+fn route_stats(store: &Store) -> Result<BTreeMap<(String, String), RouteStat>> {
+    let prices: BTreeMap<String, Price> = match fs::read_to_string(store.root.join("prices.json")) {
+        Ok(text) => {
+            serde_json::from_str(&text).map_err(|e| format!("prices.json is not valid ({e})"))?
+        }
+        Err(_) => BTreeMap::new(),
+    };
+    let mut stats: BTreeMap<(String, String), RouteStat> = BTreeMap::new();
+    for run in store.runs()? {
+        for e in log_events(&run)? {
+            let (Some(who), Some(model), Some(result)) = (
+                e.get("who").map(value_str),
+                e.get("model").map(value_str),
+                e.get("result").map(value_str),
+            ) else {
+                continue;
+            };
+            if e.get("step").is_none() {
+                continue;
+            }
+            let num = |k: &str| {
+                e.get(k)
+                    .map(value_str)
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(0.0)
+            };
+            let stat = stats.entry((who, model.clone())).or_insert(RouteStat {
+                steps: 0,
+                passed: 0,
+                dollars: 0.0,
+                priced: true,
+            });
+            stat.steps += 1;
+            if result == "pass" {
+                stat.passed += 1;
+            }
+            match lookup(&prices, &model) {
+                Some(p) => {
+                    stat.dollars += (num("in") * p.input + num("out") * p.output) / 1_000_000.0
+                }
+                None => stat.priced = false,
+            }
+        }
+    }
+    Ok(stats)
+}
+
+fn run_stats(store: &Store) -> Result<()> {
+    let stats = route_stats(store)?;
+    if stats.is_empty() {
+        println!("no step results logged with who= and model= yet");
+        return Ok(());
+    }
+    for ((who, model), s) in &stats {
+        let rate = (100 * s.passed).checked_div(s.steps).unwrap_or(0);
+        let per = if s.priced && s.passed > 0 {
+            format!("${:.4} per passed step", s.dollars / s.passed as f64)
+        } else if !s.priced {
+            "no price in prices.json".to_string()
+        } else {
+            "nothing passed yet".to_string()
+        };
+        println!(
+            "{who} {model}: {} steps, {} passed ({rate}%), {per}",
+            s.steps, s.passed
+        );
+    }
+    Ok(())
+}
+
+/// Cheapest model with at least three steps and four passes in five for this route.
+/// (Routers plateau; a table of measured pass rates is as good as a learned one and honest.)
+fn route(store: &Store, who: &str) -> Result<()> {
+    let stats = route_stats(store)?;
+    let mut candidates: Vec<(&(String, String), &RouteStat)> = stats
+        .iter()
+        .filter(|((w, _), s)| w == who && s.steps >= 3 && s.passed * 5 >= s.steps * 4)
+        .collect();
+    candidates.sort_by(|a, b| {
+        let cost = |s: &RouteStat| {
+            if s.priced {
+                s.dollars / s.passed.max(1) as f64
+            } else {
+                f64::MAX
+            }
+        };
+        cost(a.1)
+            .partial_cmp(&cost(b.1))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    match candidates.first() {
+        Some(((_, model), s)) => {
+            let rate = 100 * s.passed / s.steps;
+            let per = if s.priced {
+                format!(", ${:.4} per passed step", s.dollars / s.passed as f64)
+            } else {
+                String::new()
+            };
+            println!("{who}: {model} ({rate}% of {} steps{per})", s.steps);
+        }
+        None => println!(
+            "{who}: not enough data (need 3+ steps with 4 in 5 passing on one model); start with the small model and log who=, model=, in=, out=, result="
+        ),
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- lessons
+
+fn today() -> chrono::NaiveDate {
+    chrono::Local::now().date_naive()
+}
+
+fn date_plus(days: i64) -> String {
+    (today() + chrono::Duration::days(days))
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+fn lesson_in_force(l: &Lesson) -> bool {
+    chrono::NaiveDate::parse_from_str(&l.valid_until, "%Y-%m-%d")
+        .map(|d| d >= today())
+        .unwrap_or(false)
+}
+
+fn lesson_quarantined(l: &Lesson) -> bool {
+    matches!(l.source.as_str(), "tool" | "web")
+}
+
+fn lesson_line(l: &Lesson, marks: bool) -> String {
+    let mut flags = String::new();
+    if marks {
+        if lesson_quarantined(l) {
+            flags.push_str(", quarantined");
+        }
+        if !lesson_in_force(l) {
+            flags.push_str(", expired");
+        }
+    }
+    format!(
+        "{}. {} [{}, +{}/-{}{flags}]",
+        l.id, l.text, l.scope, l.helpful, l.harmful
+    )
+}
+
+fn lesson(store: &Store, cmd: LessonCmd) -> Result<()> {
+    let mut lessons: Vec<Lesson> = store.load("lessons.json")?;
+    match cmd {
+        LessonCmd::Add {
+            text,
+            scope,
+            source,
+            run,
+            days,
+        } => {
+            let id = next_id(lessons.iter().map(|l| l.id));
+            let quarantined = matches!(source.as_str(), "tool" | "web");
+            lessons.push(Lesson {
+                id,
+                text,
+                scope: scope.to_lowercase(),
+                source,
+                run,
+                helpful: 0,
+                harmful: 0,
+                created: now(),
+                valid_until: date_plus(days),
+            });
+            store.save("lessons.json", &lessons)?;
+            println!(
+                "lesson {id} added{}",
+                if quarantined {
+                    " (quarantined: from tool or web output; `sw lesson trust` after checking it)"
+                } else {
+                    ""
+                }
+            );
+        }
+        LessonCmd::List { all } => {
+            for l in lessons
+                .iter()
+                .filter(|l| all || (lesson_in_force(l) && !lesson_quarantined(l)))
+            {
+                println!("{}", lesson_line(l, all));
+            }
+        }
+        LessonCmd::Vote { id, direction } => {
+            let l = find(&mut lessons, id, |l| l.id)?;
+            match direction.as_str() {
+                "up" => {
+                    l.helpful += 1;
+                    l.valid_until = date_plus(LESSON_RENEWAL_DAYS);
+                }
+                "down" => l.harmful += 1,
+                other => return Err(format!("vote up or down, not '{other}'")),
+            }
+            let (helpful, harmful) = (l.helpful, l.harmful);
+            store.save("lessons.json", &lessons)?;
+            println!("lesson {id}: +{helpful}/-{harmful}");
+        }
+        LessonCmd::Trust { id } => {
+            find(&mut lessons, id, |l| l.id)?.source = "user".into();
+            store.save("lessons.json", &lessons)?;
+            println!("lesson {id} trusted");
+        }
+        LessonCmd::For { goal, all, limit } => {
+            let goal = goal.to_lowercase();
+            let mut hits: Vec<&Lesson> = lessons
+                .iter()
+                .filter(|l| l.scope == "global" || goal.contains(l.scope.as_str()))
+                .filter(|l| all || (lesson_in_force(l) && !lesson_quarantined(l)))
+                .collect();
+            // Best first: net votes, then newest. Soft ranking, never a hard rule.
+            hits.sort_by(|a, b| {
+                let score = |l: &Lesson| l.helpful as i64 - l.harmful as i64;
+                score(b)
+                    .cmp(&score(a))
+                    .then_with(|| b.created.cmp(&a.created))
+            });
+            for l in hits.iter().take(limit) {
+                println!("{}", lesson_line(l, all));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn status(store: &Store) -> Result<()> {
@@ -1661,6 +2189,16 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
         RunCmd::Freeze { run, paths } => run_freeze(&store.resolve_run(&run)?, &paths)?,
         RunCmd::Snapshot { run, step } => run_snapshot(&store.resolve_run(&run)?, &step)?,
         RunCmd::Rewind { run, step } => run_rewind(&store.resolve_run(&run)?, &step)?,
+        RunCmd::Brief => run_brief(store)?,
+        RunCmd::Stats => run_stats(store)?,
+        RunCmd::Next { run } => {
+            let dir = store.resolve_run(&run)?;
+            let plan = fs::read_to_string(dir.join("plan.md")).unwrap_or_default();
+            let runnable = runnable_steps(&plan, &step_results(&dir));
+            if !runnable.is_empty() {
+                println!("{}", runnable.join(" "));
+            }
+        }
     }
     Ok(())
 }
@@ -1762,13 +2300,29 @@ fn inbox(store: &Store, cmd: InboxCmd) -> Result<()> {
             body,
             run,
         } => {
+            let run = run.unwrap_or_default();
+            if matches!(kind, Kind::Ask) {
+                // Question budget: more questions do not get more answers (Ask Less, Ask
+                // Better; Ask Early, Ask Late, Ask Right). Three open per run, then act on
+                // the reversible default and record the assumption.
+                let open = cards
+                    .iter()
+                    .filter(|c| matches!(c.kind, Kind::Ask) && c.status == "open" && c.run == run)
+                    .count();
+                if open >= ASK_BUDGET {
+                    return Err(format!(
+                        "{open} questions are already open for this run (budget {ASK_BUDGET}); \
+                         take the reversible default and note the assumption, or wait for an answer"
+                    ));
+                }
+            }
             let id = next_id(cards.iter().map(|c| c.id));
             cards.push(Card {
                 id,
                 kind,
                 title,
                 body: body.unwrap_or_default(),
-                run: run.unwrap_or_default(),
+                run,
                 status: "open".into(),
                 created: now(),
                 answer: None,
