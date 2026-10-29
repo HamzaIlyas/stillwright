@@ -285,6 +285,13 @@ enum RunCmd {
     },
     /// Across all runs: steps, pass rate and dollars per passed step for each (who, model)
     Stats,
+    /// The review packet for a step: goal, constraints, the step and its check, the diff since
+    /// the last snapshot and the latest check output. Nothing the worker said about the step;
+    /// a fresh reviewer judges the work, then logs `result=pass|fail evidence=<verdict file>`.
+    Review {
+        run: String,
+        step: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1180,6 +1187,172 @@ fn run_done(run: &Path, step: &str) -> Result<()> {
     println!(
         "step {step}: done, certified (`{cmd}` exit 0 on tree {})",
         short(&tree)
+    );
+    Ok(())
+}
+
+/// A pass on a step no command can check must point at evidence: a non-empty file (the
+/// reviewer's verdict, a screenshot, the fetched page). The path is stored absolute with its
+/// hash, so the claim and what backed it can be opened together later.
+fn with_evidence(
+    pairs: Vec<(String, String)>,
+    run: &str,
+    step: &str,
+) -> Result<Vec<(String, String)>> {
+    let given = pairs
+        .iter()
+        .find(|(k, _)| k == "evidence")
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "step {step} has no command check, so a pass needs evidence=<file> (the reviewer's \
+                 verdict, a screenshot, the fetched page). `sw run review {run} {step}` prints what a \
+                 fresh reviewer should see and where to write the verdict."
+            )
+        })?;
+    let path = std::path::absolute(&given).map_err(|e| format!("evidence {given}: {e}"))?;
+    let meta = fs::metadata(&path)
+        .map_err(|_| format!("evidence file not found: {} (step {step})", path.display()))?;
+    if !meta.is_file() {
+        return Err(format!("evidence must be a file: {}", path.display()));
+    }
+    if meta.len() == 0 {
+        return Err(format!("evidence file is empty: {}", path.display()));
+    }
+    let sha = content_hash(&path)?;
+    let mut out: Vec<(String, String)> = pairs
+        .into_iter()
+        .filter(|(k, _)| k != "evidence" && k != "evidence_sha256")
+        .collect();
+    out.push(("evidence".into(), path.to_string_lossy().into_owned()));
+    out.push(("evidence_sha256".into(), sha));
+    Ok(out)
+}
+
+/// The most lines a section of the review packet may take; the rest is counted, not shown.
+const PACKET_LINES: usize = 400;
+
+fn clip_lines(text: &str, max: usize) -> String {
+    let total = text.lines().count();
+    if total <= max {
+        return text.trim_end().to_string();
+    }
+    let shown: Vec<&str> = text.lines().take(max).collect();
+    format!("{}\n… {} more lines", shown.join("\n"), total - max)
+}
+
+/// The newest snapshot of a step before `step` in this run: ("step K", commit).
+fn review_base(top: &str, run: &Path, step: &str) -> Option<(String, String)> {
+    let this: u64 = step.parse().ok()?;
+    let prefix = snapshot_ref(run, "step-");
+    let refs = git(
+        Some(top),
+        &[],
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            &snapshot_ref(run, ""),
+        ],
+    )?;
+    refs.lines()
+        .filter_map(|line| {
+            let (name, commit) = line.split_once(' ')?;
+            let k: u64 = name.strip_prefix(&prefix)?.parse().ok()?;
+            (k < this).then(|| (k, commit.to_string()))
+        })
+        .max_by_key(|(k, _)| *k)
+        .map(|(k, commit)| (format!("step {k}"), commit))
+}
+
+/// The diff a reviewer should read: the last snapshot before this step (or HEAD) against the
+/// working tree as it is now, untracked files included, the state folder left out.
+fn print_changes(top: &str, run: &Path, step: &str) -> Result<()> {
+    let (label, base) = match review_base(top, run, step) {
+        Some(base) => base,
+        None => match git(Some(top), &[], &["rev-parse", "--verify", "-q", "HEAD"]) {
+            Some(head) => ("HEAD".to_string(), head),
+            None => {
+                // No commit yet: diff against the empty tree (write-tree on a missing index).
+                let index = temp_git_path("empty-index");
+                let empty = git(Some(top), &[("GIT_INDEX_FILE", &index)], &["write-tree"])
+                    .ok_or("git write-tree failed")?;
+                ("an empty repository".to_string(), empty)
+            }
+        },
+    };
+    let now = tree_of_worktree(top, true)?;
+    let diff = git(
+        Some(top),
+        &[],
+        &[
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--stat=80",
+            "-p",
+            &base,
+            &now,
+        ],
+    )
+    .ok_or_else(|| format!("git diff {} failed", short(&base)))?;
+    println!("\nChanges since {label} (tracked and new files, ignored files left out):");
+    if diff.trim().is_empty() {
+        println!("(none)");
+    } else {
+        println!("{}", clip_lines(&diff, PACKET_LINES));
+    }
+    Ok(())
+}
+
+/// The review packet: what a fresh reviewer may see. The plan's goal and constraints, the step
+/// and its check, the changes since the last snapshot, the latest check output. What the worker
+/// wrote about the step (its notes, its result) is left out on purpose.
+fn run_review(run: &Path, step: &str) -> Result<()> {
+    let plan = fs::read_to_string(run.join("plan.md"))
+        .map_err(|_| format!("{} has no plan.md yet", file_name(run)))?;
+    let line =
+        plan_step_line(&plan, step).ok_or_else(|| format!("step {step} is not in plan.md"))?;
+    let check = plan_step_check(&plan, step).unwrap_or_else(|| "(none in the plan)".to_string());
+    println!("Review packet: step {step} of {}", file_name(run));
+    println!("What the worker said about this step is left out on purpose; judge the work.");
+    for l in plan.lines().map(str::trim) {
+        if let Some(goal) = l.strip_prefix("# Goal:") {
+            println!("Goal: {}", goal.trim());
+        } else if l.to_lowercase().starts_with("must not:")
+            || l.to_lowercase().starts_with("never:")
+            || l.starts_with("Outward:")
+        {
+            println!("{l}");
+        }
+    }
+    println!("Step {step}: {line}");
+    println!("Check: {check}");
+    match git_top() {
+        Some(top) => print_changes(&top, run, step)?,
+        None => println!(
+            "\nChanges: no git repository here, so there is no diff; open the files the step names."
+        ),
+    }
+    if let Some(receipt) = latest_receipt(run, step)? {
+        let name = receipt.get("log").map(value_str).unwrap_or_default();
+        let text = fs::read_to_string(run.join("checks").join(&name))
+            .unwrap_or_else(|_| "(output file missing)".to_string());
+        println!(
+            "\nLatest check output (`{}`, exit {}):",
+            receipt.get("cmd").map(value_str).unwrap_or_default(),
+            receipt.get("exit").map(value_str).unwrap_or_default()
+        );
+        println!("{}", clip_lines(&text, PACKET_LINES / 4));
+    }
+    let verdict = run.join("checks").join(format!("step-{step}-review.md"));
+    println!(
+        "\nStart from FAIL. Pass only what the changes and the output prove; list each requirement \
+         of the check as pass or fail with the evidence. Write the verdict to {} and log it with \
+         `sw run log {} step={step} result=pass|fail evidence={}`.",
+        verdict.display(),
+        file_name(run),
+        verdict.display()
     );
     Ok(())
 }
@@ -2270,6 +2443,11 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                          Run `sw run check {run} {step}`, then `sw run done {run} {step}`."
                     ));
                 }
+                if result == "pass" {
+                    let parsed = with_evidence(parsed, &run, &step)?;
+                    append_event(&dir, &parsed)?;
+                    return Ok(());
+                }
             }
             append_event(&dir, &parsed)?;
         }
@@ -2300,6 +2478,7 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
         RunCmd::Cost { run } => run_cost(store, &store.resolve_run(&run)?)?,
         RunCmd::Check { run, step } => run_check(&store.resolve_run(&run)?, &step)?,
         RunCmd::Done { run, step } => run_done(&store.resolve_run(&run)?, &step)?,
+        RunCmd::Review { run, step } => run_review(&store.resolve_run(&run)?, &step)?,
         RunCmd::Freeze { run, paths } => run_freeze(&store.resolve_run(&run)?, &paths)?,
         RunCmd::Snapshot { run, step } => run_snapshot(&store.resolve_run(&run)?, &step)?,
         RunCmd::Rewind { run, step } => run_rewind(&store.resolve_run(&run)?, &step)?,

@@ -44,11 +44,18 @@ in a fresh context: it reads the output and the check, nothing else, so it costs
 
 ## Fresh reviewer brief
 
-When a command can't decide it, spawn a reviewer with: the request, the check, the paths
-of the outputs, and "Start from FAIL. Pass only what you can prove from the files. List
-each requirement as pass/fail with the evidence." Give it read-only tools.
+When a command can't decide it, run `sw run review latest N` and give the reviewer that
+packet and nothing else: it holds the goal, the must-nots, the step and its check, the diff
+since the last snapshot (new files included) and the latest check output, and it leaves out
+what the worker said. The packet ends with the brief ("Start from FAIL. Pass only what the
+changes and the output prove; list each requirement as pass or fail with the evidence") and
+the path the verdict goes to (`<run>/checks/step-N-review.md`). Give the reviewer read-only
+tools; it may open files the packet names, never the run log.
 
 ## Result
 
-Log it: `sw run log latest step=N result=pass|fail check="..." note="<evidence or error, one line>"`.
-On fail, the note says exactly what broke so the retry can fix it.
+Log it: `sw run log latest step=N result=pass|fail check="..." evidence=<verdict file> note="<one line>"`.
+A pass on a step with no command check is refused without `evidence=`: a non-empty file
+(the verdict, a screenshot, the fetched page), stored with its hash, so the claim and what
+backed it can be opened together later. On fail, the note says exactly what broke so the
+retry can fix it.

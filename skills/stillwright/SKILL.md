@@ -103,9 +103,12 @@ the user's call. `sw status` gives a one-screen summary; `sw --help` lists every
    finish the step's work, then `sw run done latest N`; it refuses a failed receipt and a
    stale one (tree changed since the check: run the check again). A pass logged by hand is
    refused for such steps, so there is nothing to claim. Only when nothing executable can
-   decide (writing, research, a design) use the fresh reviewer from `sw-verify`, on the small
-   model, and log its verdict with the step's cost:
-   `sw run log latest step=N who=<route> model=<model> in=<tokens> out=<tokens> check="<check>" result=pass|fail note="<one line>"`
+   decide (writing, research, a design): `sw run review latest N` prints the review packet
+   (goal, must-nots, the step and its check, the diff since the last snapshot, the latest
+   check output; nothing you said about the step). Give that packet, and nothing else, to a
+   fresh read-only reviewer on the small model (`sw-verify`); it writes its verdict to the
+   file the packet names. A pass on such a step is refused without `evidence=<that file>`:
+   `sw run log latest step=N who=<route> model=<model> in=<tokens> out=<tokens> check="<check>" result=pass|fail evidence=<verdict file> note="<one line>"`
    (`in`/`out` from the subagent's usage report; omit them only when the harness gives none).
    For command steps, log cost the same way without `result=`.
    `sw run cost` sums the run in dollars at the prices in `~/.stillwright/prices.json`.
