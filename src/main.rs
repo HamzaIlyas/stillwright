@@ -1318,6 +1318,16 @@ fn evidence_problems(run: &Path) -> Result<Vec<String>> {
     Ok(problems)
 }
 
+/// `fs::canonicalize` on Windows returns a `\\?\C:\…` verbatim path; the plain form is what
+/// users and other tools write.
+fn plain_path(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if cfg!(windows) && !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => path,
+    }
+}
+
 /// A pass on a step no command can check must point at evidence: a non-empty file (the
 /// reviewer's verdict, a screenshot, the fetched page) outside the run folder, or under its
 /// `checks/`. The path is stored canonical with the file's sha256, so the claim and what backed
@@ -1340,8 +1350,10 @@ fn with_evidence(
                  fresh reviewer should see and where to write the verdict."
             )
         })?;
-    let path = fs::canonicalize(&given)
-        .map_err(|_| format!("evidence file not found: {given} (step {step})"))?;
+    let path = plain_path(
+        fs::canonicalize(&given)
+            .map_err(|_| format!("evidence file not found: {given} (step {step})"))?,
+    );
     if !path.is_file() {
         return Err(format!("evidence must be a file: {}", path.display()));
     }
