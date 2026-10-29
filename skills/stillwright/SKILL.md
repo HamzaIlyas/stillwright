@@ -31,10 +31,12 @@ know the user is never finished: every run can teach something, recorded as a da
    third-party code for the first time: only with a `review` card for the run that the user
    answered yes. A step marked `outward: <what leaves the machine>` is held by `sw run next`,
    refused by `sw run check`, `sw run done` and a hand-logged pass, and `git push`, `gh pr
-   create|merge`, `gh release create`, `npm|cargo|gem|twine publish` are asked about by the gate,
-   until that card exists (`sw inbox add review "<what goes out>" --run latest`, the user says
-   yes, `sw inbox answer <id> yes`). The yes is for the plan as it stands: editing plan.md
-   afterwards voids it. A denied permission stays denied; never route around it.
+   create|merge`, `gh release create`, `npm|cargo|bun publish`, `gem push`, `twine upload`,
+   `docker push` are asked about by the gate, until that card exists (`sw inbox add review
+   "<what goes out>" --run <run name from sw run new>`, the user says yes, `sw inbox answer
+   <id> yes`). The yes is for the plan as it stands when the card is added: editing plan.md
+   afterwards voids it, a later card answered no revokes it, and closing the card ends nothing
+   (close it after the step is done). A denied permission stays denied; never route around it.
 6. **Small, checkable chunks.** Today's models finish roughly 3-hour tasks reliably; longer
    work fails silently. Split every goal into steps that can each be verified.
 7. **State lives in files, not memory.** Anything a new session needs is in `~/.stillwright`.
