@@ -46,6 +46,9 @@ pub struct Decision {
     pub reason: String,
     pub paths: Vec<Target>,
     pub command: String,
+    /// Set when the command publishes something (push, publish, merge, release): not
+    /// destructive, but an outward action the policy layer may hold for consent.
+    pub outward: Option<String>,
 }
 
 /// A rule from guards.md: `never: <text>` blocks, `ask: <text>` asks, when the command
@@ -97,6 +100,7 @@ pub fn judge(command: &str, workspace: &Path, cwd: &Path) -> Decision {
         reason: "no destructive pattern".into(),
         paths: Vec::new(),
         command: command.to_string(),
+        outward: None,
     };
     let mut ctx = Context {
         workspace: fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf()),
@@ -338,6 +342,27 @@ fn judge_simple(raw: &[String], ctx: &mut Context, decision: &mut Decision) {
         .collect::<Vec<_>>()
         .join(" ");
     match name.as_str() {
+        "npm" | "pnpm" | "yarn" if args.first() == Some(&"publish") => {
+            decision.outward = Some(format!("`{name} publish` publishes a package"));
+        }
+        "cargo" if args.first() == Some(&"publish") => {
+            decision.outward = Some("`cargo publish` publishes a crate".into());
+        }
+        "twine" if args.first() == Some(&"upload") => {
+            decision.outward = Some("`twine upload` publishes a package".into());
+        }
+        "gem" if args.first() == Some(&"push") => {
+            decision.outward = Some("`gem push` publishes a gem".into());
+        }
+        "gh" if joined.starts_with("pr merge")
+            || joined.starts_with("pr create")
+            || joined.starts_with("release create") =>
+        {
+            decision.outward = Some(format!(
+                "`gh {}` acts on GitHub for everyone to see",
+                args[..2].join(" ")
+            ));
+        }
         "cd" => {
             // Later commands run from here; `cd .. && rm -rf x` is judged where it lands.
             if let Some(dir) = args.iter().find(|a| !a.starts_with('-')) {
@@ -613,6 +638,9 @@ fn judge_git(args: &[&str], ctx: &Context, decision: &mut Decision) {
                 "`git push --force` (or a `+`/`:` refspec) rewrites or deletes remote history"
                     .into(),
             );
+        }
+        "push" => {
+            decision.outward = Some("`git push` publishes commits".into());
         }
         "reset" if has("--hard") || has("--merge") => {
             raise(
