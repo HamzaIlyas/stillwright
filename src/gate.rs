@@ -46,6 +46,9 @@ pub struct Decision {
     pub reason: String,
     pub paths: Vec<Target>,
     pub command: String,
+    /// Set when the command publishes something (push, publish, merge, release): not
+    /// destructive, but an outward action the policy layer may hold for consent.
+    pub outward: Option<String>,
 }
 
 /// A rule from guards.md: `never: <text>` blocks, `ask: <text>` asks, when the command
@@ -97,6 +100,7 @@ pub fn judge(command: &str, workspace: &Path, cwd: &Path) -> Decision {
         reason: "no destructive pattern".into(),
         paths: Vec::new(),
         command: command.to_string(),
+        outward: None,
     };
     let mut ctx = Context {
         workspace: fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf()),
@@ -240,6 +244,15 @@ fn unwrap(mut words: &[String], ctx: &mut Context, decision: &mut Decision) -> V
         let Some(first) = words.first() else {
             return Vec::new();
         };
+        // `FOO=1 git push`: a leading assignment is not the command.
+        if first.split_once('=').is_some_and(|(k, _)| {
+            !k.is_empty()
+                && !k.starts_with(|c: char| c.is_ascii_digit())
+                && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }) {
+            words = &words[1..];
+            continue;
+        }
         let name = base_name(first).to_lowercase();
         if KEYWORDS.contains(&name.as_str()) {
             words = &words[1..];
@@ -326,6 +339,42 @@ fn unwrap(mut words: &[String], ctx: &mut Context, decision: &mut Decision) -> V
     }
 }
 
+/// Commands that publish something: a package, an image, a pull request, a release. Not
+/// destructive, so the verdict stays; the policy layer decides whether consent exists.
+fn outward_command(name: &str, args: &[&str]) -> Option<String> {
+    let dry = args.contains(&"--dry-run");
+    // Skip leading options (`--registry=x`, `-r`, `+nightly`, `-R owner/repo`) to the subcommand.
+    let mut i = 0;
+    while i < args.len() && (args[i].starts_with('-') || args[i].starts_with('+')) {
+        let takes_value = matches!(args[i], "-R" | "--repo" | "--registry" | "-C");
+        i += if takes_value { 2 } else { 1 };
+    }
+    let rest = &args[i.min(args.len())..];
+    let rest = match (name, rest.first()) {
+        ("yarn", Some(&"npm")) => &rest[1..],
+        _ => rest,
+    };
+    let sub = rest.first().map(|s| s.to_lowercase()).unwrap_or_default();
+    let next = rest.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
+    let what = match name {
+        "npm" | "pnpm" | "yarn" | "bun" if sub == "publish" && !dry => {
+            format!("`{name} publish` publishes a package")
+        }
+        "cargo" if sub == "publish" && !dry => "`cargo publish` publishes a crate".into(),
+        "twine" if sub == "upload" => "`twine upload` publishes a package".into(),
+        "gem" if sub == "push" => "`gem push` publishes a gem".into(),
+        "docker" | "podman" if sub == "push" => format!("`{name} push` publishes an image"),
+        "gh" if (sub == "pr" && (next == "merge" || next == "create"))
+            || (sub == "release" && (next == "create" || next == "upload"))
+            || (sub == "repo" && next == "create") =>
+        {
+            format!("`gh {sub} {next}` acts on GitHub for everyone to see")
+        }
+        _ => return None,
+    };
+    Some(what)
+}
+
 fn judge_simple(raw: &[String], ctx: &mut Context, decision: &mut Decision) {
     let words = unwrap(raw, ctx, decision);
     let Some(first) = words.first() else { return };
@@ -337,6 +386,9 @@ fn judge_simple(raw: &[String], ctx: &mut Context, decision: &mut Decision) {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
+    if let Some(what) = outward_command(&name, &args) {
+        decision.outward = Some(what);
+    }
     match name.as_str() {
         "cd" => {
             // Later commands run from here; `cd .. && rm -rf x` is judged where it lands.
@@ -613,6 +665,9 @@ fn judge_git(args: &[&str], ctx: &Context, decision: &mut Decision) {
                 "`git push --force` (or a `+`/`:` refspec) rewrites or deletes remote history"
                     .into(),
             );
+        }
+        "push" if !has("--dry-run") && !short_has('n') => {
+            decision.outward = Some("`git push` publishes commits".into());
         }
         "reset" if has("--hard") || has("--merge") => {
             raise(
