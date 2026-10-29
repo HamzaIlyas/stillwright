@@ -38,7 +38,11 @@ know the user is never finished: every run can teach something, recorded as a da
    afterwards voids it, a later card answered no revokes it, and closing the card ends nothing
    (close it after the step is done). A denied permission stays denied; never route around it.
 6. **Small, checkable chunks.** Today's models finish roughly 3-hour tasks reliably; longer
-   work fails silently. Split every goal into steps that can each be verified.
+   work fails silently. Split every goal into steps that can each be verified. A goal that
+   comes with tests or a check command gets a run and a `check: $` step, however small the
+   fix: a one-line change is where "done" gets claimed without proof, so the receipt is
+   not optional there. Only a goal with nothing to check and nothing to change (a question,
+   a look-up) is answered without a run.
 7. **State lives in files, not memory.** Anything a new session needs is in `~/.stillwright`.
 
 ## The tool
