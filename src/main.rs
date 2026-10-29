@@ -1357,7 +1357,7 @@ fn with_evidence(
     if !path.is_file() {
         return Err(format!("evidence must be a file: {}", path.display()));
     }
-    if let Ok(run_dir) = fs::canonicalize(dir) {
+    if let Ok(run_dir) = fs::canonicalize(dir).map(plain_path) {
         if path.starts_with(&run_dir) && !path.starts_with(run_dir.join("checks")) {
             return Err(format!(
                 "evidence cannot be one of the run folder's own files ({}); write the verdict under {}",
