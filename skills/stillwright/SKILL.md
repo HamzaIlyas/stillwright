@@ -5,7 +5,7 @@ compatibility: Needs the sw binary (Linux, macOS, Windows). scripts/get-sw.sh in
 license: MIT
 metadata:
   author: Hamza Ilyas
-  version: "0.1.5"
+  version: "0.2.0"
 ---
 
 # Stillwright

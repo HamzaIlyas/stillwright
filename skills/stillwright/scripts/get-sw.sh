@@ -4,7 +4,7 @@
 # pinned release below, so a run never executes whatever "latest" happens to be.
 set -eu
 REPO="HamzaIlyas/stillwright"
-VERSION="0.1.5"
+VERSION="0.2.0"
 if command -v sw >/dev/null 2>&1; then
   echo "sw already installed: $(command -v sw)"
   exit 0
