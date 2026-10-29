@@ -7,8 +7,9 @@ same for cost as for work: a number counts when a run produced it. This page is 
 
 1. Put current prices in `~/.stillwright/prices.json` (copy `docs/prices.example.json`, check
    it against your vendor's pricing page; sw never guesses a price).
-2. Log usage on steps as they finish: `sw run log latest step=2 model=claude-haiku-4-5 in=12000 out=900 result=pass`
-   (`in`/`out` from the harness's usage report for that subagent or turn).
+2. Log usage on steps as they finish: `sw run log latest step=2 model=claude-haiku-4-5 in=12000 out=900`
+   (`in`/`out` from the harness's usage report for that subagent or turn; the step's result
+   comes from `sw run done` or from a reviewer's `result=pass evidence=<file>`).
 3. `sw run cost` sums the run per model and refuses to total a model it has no price for.
 
 Claude Code also reports the session's own spend: `/usage` shows dollars per model and the

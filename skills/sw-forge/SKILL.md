@@ -46,7 +46,7 @@ place with numbers, not with the feeling that it is useful.
    `~/.stillwright/forge/<name>/prev/`, outside the pinned folder).
 3. Grade each run with the need's own check command, or with a fresh read-only reviewer that
    did not write the skill (the rule from `sw-verify`), and quote the outcome into the run log:
-   `sw run log latest step=N check="evals old vs new" result=pass|fail note="new 3/3, baseline 1/3, tokens +8%"`.
+   `sw run log latest step=N check="evals old vs new" result=pass|fail evidence=<the eval report file> note="new 3/3, baseline 1/3, tokens +8%"`.
 4. The skill goes forward only if it is better on at least one prompt and worse on none, or
    equal everywhere with fewer retries or tokens. A plain tie is not enough. Otherwise fix and
    rerun, or drop it and log why.
