@@ -52,10 +52,19 @@ the user's call. `sw status` gives a one-screen summary; `sw --help` lists every
 3. **Plan.** `sw run new <slug> --goal <id>`, then write `plan.md` in that folder:
    ```
    # Goal: <what done means, one sentence>
+   Must not: <what the user would never want, even if nobody said it>
    1. <step> | who: <route> | check: <exact check> | after: <step numbers or ->
    Outward: <actions needing approval, or none>
    ```
-   Only numbered lines containing `| check:` count as steps. Write the check as a command
+   Only numbered lines containing `| check:` count as steps. Before writing the plan, read
+   `sw lesson for "<goal>"` (at most five lessons, best first; suggestions, not rules) and
+   write one to three `Must not:` lines: the goal as stated is evidence of what the user
+   wants, not the whole of it (a cutter must not cut what is alive). `sw run brief` prints
+   the goal, the must-nots and the next step, and `sw init` wires it to run again after every
+   context compaction, so they are never lost with the history. Questions about the goal are
+   asked now or never: a goal question after the work has started is worth almost nothing
+   (ask early, ask right), and the inbox refuses a fourth open question per run. Prefer the
+   reversible default and record the assumption in the plan. Write the check as a command
    whenever one can decide: `check: $ <command>` (exit 0 means pass; pipes inside it are
    kept, so put `check:` last before `after:`). Then `sw run check latest N` runs it and
    writes a receipt, and `sw run done latest N` is the only way to pass the step. Before the
@@ -69,13 +78,20 @@ the user's call. `sw status` gives a one-screen summary; `sw --help` lists every
    wait for it. Otherwise go.
 4. **Get capabilities.** For each step, find the best tool: installed skills/agents first,
    then `sw-scout`, and `sw-forge` only if nothing good exists.
-5. **Execute, cheapest worker first.** The small model does every step that a command can
-   check: file edits with a test, lookups, searches, formatting, scripted work. How much that
-   saves depends on the account: Haiku 5.5 is about a twentieth of Sonnet's price per token,
-   Haiku 4.5 about half, and on tasks that fit in one sitting the session's fixed cost
-   outweighs both; measure with `sw run cost` and `docs/cost.md` instead of assuming. Send it through the `sw-worker` skill with a self-contained brief: the
-   step, the exact files, the constraints, and the check to run (it always runs forked on
-   the small model). Run independent steps in the same message so they go in parallel. Keep the mid model for judgement that
+5. **Execute, cheapest worker first.** `sw run next` lists the steps whose `after:` steps
+   passed: start all of them in the same message so they run in parallel, one writer per
+   file. `sw route <who>` names the cheapest model that passed four in five of at least three
+   logged steps for that route; with no data, start small. The small model does every step
+   that a command can check: file edits with a test, lookups, searches, formatting, scripted
+   work. How much that saves depends on the account: measure with `sw run stats` and
+   `docs/cost.md` instead of assuming. Send it through the `sw-worker` skill with a
+   self-contained brief: the step, the exact files, the constraints, the must-nots, and the
+   check to run (it always runs forked on the small model). Before any command that deletes,
+   rewrites history, pipes a download into a shell or wipes data, run `sw gate -- <command>`
+   (the hook does it on its own in Claude Code): `ask` means an inbox `review` card with the
+   printed paths and blast radius, `block` means do not, and a `never:` line in `guards.md`
+   is the user's word. A step that passes its check on the first try gets no retry and no
+   second opinion. Keep the mid model for judgement that
    no command can check (design, ambiguous bugs, writing for a person), and the top model
    only for a step the mid one failed. On a failed check, retry once one tier up with the
    error in the brief; Anthropic measured low-first-then-retry at about 40% less cost than
@@ -98,10 +114,16 @@ the user's call. `sw status` gives a one-screen summary; `sw --help` lists every
    card's text and nothing more. The plan, the log and the files already hold the details.
    A long report after a short card is the usual way this rule breaks; it happened in every
    run of the first eval. Record any real preference learned with `sw note add ... --source`.
+   What the run taught about the work goes into `sw lesson add "<one line>" --scope <goal word
+   or global> --source self|reviewer --run <run>`: lessons from a passing run may be global;
+   a lesson from a failure stays scoped to that goal (they rarely transfer). When a later
+   step used a lesson, `sw lesson vote <id> up|down`; nothing learned from tool or web output
+   enters without `--source tool|web`, which keeps it quarantined until the user trusts it.
 
 ## Talking to the user
 
 - `ask`: blocked on a decision only they can make. One question, with your recommended answer.
+  Three open per run at most; the binary refuses a fourth.
 - `review`: approve an outward action or a plan.
 - `notify`: something finished or broke. Never "still working".
 - `idea`: a proposal they can accept (becomes a goal) or dismiss.
