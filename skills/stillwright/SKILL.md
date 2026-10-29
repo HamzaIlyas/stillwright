@@ -38,11 +38,19 @@ know the user is never finished: every run can teach something, recorded as a da
    afterwards voids it, a later card answered no revokes it, and closing the card ends nothing
    (close it after the step is done). A denied permission stays denied; never route around it.
 6. **Small, checkable chunks.** Today's models finish roughly 3-hour tasks reliably; longer
-   work fails silently. Split every goal into steps that can each be verified. A goal that
-   comes with tests or a check command gets a run and a `check: $` step, however small the
-   fix: a one-line change is where "done" gets claimed without proof, so the receipt is
-   not optional there. Only a goal with nothing to check and nothing to change (a question,
-   a look-up) is answered without a run.
+   work fails silently. Split every goal into steps that can each be verified. Only a goal
+   that changes nothing (a question, a look-up, a status request) is answered without a
+   run. A goal that changes anything in a place with a test suite, a build, a lint or a
+   command the user named gets a run and a `check: $` step, however small the fix, and
+   that `$` is the suite or the given command verbatim (`$ pytest`, `$ npm test`), not a
+   stand-in like `$ true`: a check that would also pass on the unfixed tree proves nothing.
+   A one-line change is where "done" gets claimed without proof, so the receipt is not
+   optional there. A one-step plan is a plan: one `Must not:` line, one numbered line with
+   `check: $ <suite>`, freeze the tests, run, check, done. If the suite already fails on
+   the untouched tree, say so in the plan and check the tests that cover the change plus
+   the failing count unchanged; do not fix what the goal did not ask for. A change nothing
+   executable can decide (prose, a design) still gets a run, checked by `sw run review` and
+   `sw-verify`; a check only a person can do is a `review` card, not a `$`.
 7. **State lives in files, not memory.** Anything a new session needs is in `~/.stillwright`.
 
 ## The tool
@@ -58,8 +66,10 @@ the user's call. `sw status` gives a one-screen summary; `sw --help` lists every
 1. **Start.** `sw status`. No profile: run `sw-onboard` first. Cards the user answered
    (`sw inbox list` shows them as answered; `sw inbox show <id>` has the answer): apply
    each answer, then `sw inbox close <id>`.
-2. **Pick work.** Highest-priority open goal (`sw goal list`), or the unfinished run
-   (`sw run status`). No goals: run `sw-radar` for ideas, then stop quietly.
+2. **Pick work.** A goal given in the message is work too: `sw goal add "<goal>"` first,
+   then treat it as the open goal. Otherwise the highest-priority open goal (`sw goal
+   list`), or the unfinished run (`sw run status`). Only with no goal in the queue and none
+   in the message: run `sw-radar` for ideas, then stop quietly.
 3. **Plan.** `sw run new <slug> --goal <id>`, then write `plan.md` in that folder:
    ```
    # Goal: <what done means, one sentence>
