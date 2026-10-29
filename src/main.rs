@@ -424,7 +424,9 @@ struct Store {
 /// The state folder: `$STILLWRIGHT_HOME`, else `~/.stillwright`.
 fn state_root() -> Result<PathBuf> {
     match std::env::var_os("STILLWRIGHT_HOME").filter(|v| !v.is_empty()) {
-        Some(v) => Ok(PathBuf::from(v)),
+        Some(v) => {
+            std::path::absolute(PathBuf::from(v)).map_err(|e| format!("STILLWRIGHT_HOME: {e}"))
+        }
         None => Ok(home_dir()?.join(".stillwright")),
     }
 }
@@ -567,7 +569,10 @@ fn plan_steps(plan: &str) -> Vec<String> {
         .collect()
 }
 
-fn step_results(run: &Path) -> BTreeMap<String, String> {
+/// Results per step. A pass logged by hand (not certified by `sw run done`) counts only while
+/// the plan's check for that step is still the prose it was logged against: editing plan.md
+/// around the log call, or back to a `$` command, does not turn it into a pass.
+fn step_results(run: &Path, plan: &str) -> BTreeMap<String, String> {
     let mut results = BTreeMap::new();
     let text = fs::read_to_string(run.join("log.jsonl")).unwrap_or_default();
     for (n, line) in text.lines().enumerate() {
@@ -577,7 +582,18 @@ fn step_results(run: &Path) -> BTreeMap<String, String> {
         match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(line) {
             Ok(event) => {
                 if let (Some(step), Some(result)) = (event.get("step"), event.get("result")) {
-                    results.insert(value_str(step), value_str(result));
+                    let step = value_str(step);
+                    let mut result = value_str(result);
+                    let certified = event.get("certified") == Some(&serde_json::Value::Bool(true));
+                    if result == "pass" && !certified {
+                        let current = plan_step_check(plan, &step);
+                        let is_command = current.as_deref().and_then(command_check).is_some();
+                        let recorded = event.get("check").map(value_str);
+                        if is_command || (recorded.is_some() && recorded != current) {
+                            result = "pass logged by hand, but the plan's check changed since (does not count)".into();
+                        }
+                    }
+                    results.insert(step, result);
                 }
             }
             Err(_) => eprintln!(
@@ -604,10 +620,9 @@ struct Progress {
 
 impl Progress {
     fn of(run: &Path) -> Self {
-        let steps = fs::read_to_string(run.join("plan.md"))
-            .map(|p| plan_steps(&p))
-            .unwrap_or_default();
-        let results = step_results(run);
+        let plan = fs::read_to_string(run.join("plan.md")).unwrap_or_default();
+        let steps = plan_steps(&plan);
+        let results = step_results(run, &plan);
         let next = steps
             .iter()
             .find(|s| results.get(*s).map(String::as_str) != Some("pass"))
@@ -745,23 +760,66 @@ fn temp_git_path(kind: &str) -> PathBuf {
     path
 }
 
+/// A throw-away index, and (unless objects are kept) a throw-away object store layered over
+/// the repository's, so staging the working tree leaves nothing behind. Removed on drop.
+struct TempStore {
+    index: PathBuf,
+    objects: Option<PathBuf>,
+    alternate: Option<PathBuf>,
+}
+
+impl TempStore {
+    fn new(top: &str, keep_objects: bool) -> Result<Self> {
+        let index = temp_git_path("index");
+        if keep_objects {
+            return Ok(TempStore {
+                index,
+                objects: None,
+                alternate: None,
+            });
+        }
+        let git_dir = git(Some(top), &[], &["rev-parse", "--absolute-git-dir"])
+            .ok_or_else(|| format!("git cannot read the repository at {top}"))?;
+        let objects = temp_git_path("objects");
+        fs::create_dir_all(&objects).map_err(|e| format!("cannot create a temp store: {e}"))?;
+        Ok(TempStore {
+            index,
+            objects: Some(objects),
+            alternate: Some(PathBuf::from(git_dir).join("objects")),
+        })
+    }
+
+    fn envs(&self) -> Vec<(&str, &Path)> {
+        let mut envs: Vec<(&str, &Path)> = vec![("GIT_INDEX_FILE", &self.index)];
+        if let (Some(objects), Some(alternate)) = (&self.objects, &self.alternate) {
+            envs.push(("GIT_OBJECT_DIRECTORY", objects));
+            envs.push(("GIT_ALTERNATE_OBJECT_DIRECTORIES", alternate));
+        }
+        envs
+    }
+}
+
+impl Drop for TempStore {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.index);
+        if let Some(objects) = &self.objects {
+            let _ = fs::remove_dir_all(objects);
+        }
+    }
+}
+
 /// Tree object of the working tree as git would commit it: untracked files included, ignored
 /// files and the Stillwright state folder left out. The user's index is never touched. With
 /// `keep_objects` false the objects go to a temp store that is deleted afterwards, so hashing
 /// leaves nothing in the repository; a snapshot keeps them.
 fn tree_of_worktree(top: &str, keep_objects: bool) -> Result<String> {
-    let index = temp_git_path("index");
-    let objects = temp_git_path("objects");
-    let mut envs: Vec<(&str, &Path)> = vec![("GIT_INDEX_FILE", &index)];
-    let alternate;
-    if !keep_objects {
-        let git_dir = git(Some(top), &[], &["rev-parse", "--absolute-git-dir"])
-            .ok_or_else(|| format!("git cannot read the repository at {top}"))?;
-        alternate = PathBuf::from(git_dir).join("objects");
-        fs::create_dir_all(&objects).map_err(|e| format!("cannot create a temp store: {e}"))?;
-        envs.push(("GIT_OBJECT_DIRECTORY", &objects));
-        envs.push(("GIT_ALTERNATE_OBJECT_DIRECTORIES", &alternate));
-    }
+    let store = TempStore::new(top, keep_objects)?;
+    stage_tree(top, &store)
+}
+
+/// Stage the working tree into the store's index and write it as a tree object.
+fn stage_tree(top: &str, store: &TempStore) -> Result<String> {
+    let envs = store.envs();
     let mut add = vec!["add", "-A", "--", "."];
     let exclude;
     if let Ok(state) = state_root().and_then(|s| fs::canonicalize(s).map_err(|e| e.to_string())) {
@@ -772,7 +830,7 @@ fn tree_of_worktree(top: &str, keep_objects: bool) -> Result<String> {
             }
         }
     }
-    let tree = git(Some(top), &envs, &add)
+    git(Some(top), &envs, &add)
         .ok_or_else(|| {
             format!(
                 "git could not read the working tree at {top} (`git add -A` failed: an unreadable file, permissions, or safe.directory?)"
@@ -780,10 +838,7 @@ fn tree_of_worktree(top: &str, keep_objects: bool) -> Result<String> {
         })
         .and_then(|_| {
             git(Some(top), &envs, &["write-tree"]).ok_or_else(|| "git write-tree failed".to_string())
-        });
-    let _ = fs::remove_file(&index);
-    let _ = fs::remove_dir_all(&objects);
-    tree
+        })
 }
 
 /// Hash of the working tree; "none" outside a repository, an error when git fails inside one.
@@ -842,6 +897,7 @@ fn free_label(top: &str, run: &Path, base: &str) -> String {
 
 fn run_snapshot(run: &Path, step: &str) -> Result<()> {
     let top = git_top().ok_or("a snapshot needs a git repository here")?;
+    note_plan(run)?;
     let label = format!("step-{step}");
     let commit = take_snapshot(
         &top,
@@ -1044,6 +1100,7 @@ fn step_command(run: &Path, step: &str) -> Result<String> {
 
 fn run_check(run: &Path, step: &str) -> Result<()> {
     let cmd = step_command(run, step)?;
+    note_plan(run)?;
     let mut event = serde_json::Map::new();
     event.insert("event".into(), "receipt".into());
     event.insert("step".into(), step.into());
@@ -1164,6 +1221,7 @@ fn run_done(run: &Path, step: &str) -> Result<()> {
             short(&tree)
         ));
     }
+    note_plan(run)?;
     let mut event = serde_json::Map::new();
     event.insert("step".into(), step.into());
     event.insert("result".into(), "pass".into());
@@ -1191,11 +1249,82 @@ fn run_done(run: &Path, step: &str) -> Result<()> {
     Ok(())
 }
 
+/// Keys only sw writes: hand-logging them would forge a receipt, a snapshot or a certificate.
+const SW_KEYS: [&str; 16] = [
+    "event",
+    "ok",
+    "log",
+    "tree",
+    "certified",
+    "snapshot",
+    "exit",
+    "cmd",
+    "cwd",
+    "tampered",
+    "secs",
+    "out_sha256",
+    "receipt",
+    "commit",
+    "evidence_sha256",
+    "sha256",
+];
+
+fn plan_hash(run: &Path) -> Option<String> {
+    fs::read(run.join("plan.md"))
+        .ok()
+        .map(|b| format!("{:x}", Sha256::digest(&b)))
+}
+
+/// Record the plan's hash the first time a step is worked on, so a later edit of plan.md is
+/// visible to a reviewer.
+fn note_plan(run: &Path) -> Result<()> {
+    let Some(sha) = plan_hash(run) else {
+        return Ok(());
+    };
+    if log_events(run)?
+        .iter()
+        .any(|e| event_is(e, "event", "plan"))
+    {
+        return Ok(());
+    }
+    let mut event = serde_json::Map::new();
+    event.insert("event".into(), "plan".into());
+    event.insert("sha256".into(), sha.into());
+    append_json(run, event)
+}
+
+/// Evidence files behind hand-logged passes that are gone or changed since they were logged.
+fn evidence_problems(run: &Path) -> Result<Vec<String>> {
+    let mut latest: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for e in log_events(run)? {
+        if let (Some(step), Some(path), Some(sha)) =
+            (e.get("step"), e.get("evidence"), e.get("evidence_sha256"))
+        {
+            if event_is(&e, "result", "pass") {
+                latest.insert(value_str(step), (value_str(path), value_str(sha)));
+            }
+        }
+    }
+    let mut problems = Vec::new();
+    for (step, (path, sha)) in latest {
+        match fs::read(&path) {
+            Err(_) => problems.push(format!("step {step}: evidence missing ({path})")),
+            Ok(bytes) if format!("{:x}", Sha256::digest(&bytes)) != sha => problems.push(format!(
+                "step {step}: evidence changed since it was logged ({path})"
+            )),
+            Ok(_) => {}
+        }
+    }
+    Ok(problems)
+}
+
 /// A pass on a step no command can check must point at evidence: a non-empty file (the
-/// reviewer's verdict, a screenshot, the fetched page). The path is stored absolute with its
-/// hash, so the claim and what backed it can be opened together later.
+/// reviewer's verdict, a screenshot, the fetched page) outside the run folder, or under its
+/// `checks/`. The path is stored canonical with the file's sha256, so the claim and what backed
+/// it can be opened together later, and `sw run status` notices when it is gone or changed.
 fn with_evidence(
     pairs: Vec<(String, String)>,
+    dir: &Path,
     run: &str,
     step: &str,
 ) -> Result<Vec<(String, String)>> {
@@ -1211,16 +1340,25 @@ fn with_evidence(
                  fresh reviewer should see and where to write the verdict."
             )
         })?;
-    let path = std::path::absolute(&given).map_err(|e| format!("evidence {given}: {e}"))?;
-    let meta = fs::metadata(&path)
-        .map_err(|_| format!("evidence file not found: {} (step {step})", path.display()))?;
-    if !meta.is_file() {
+    let path = fs::canonicalize(&given)
+        .map_err(|_| format!("evidence file not found: {given} (step {step})"))?;
+    if !path.is_file() {
         return Err(format!("evidence must be a file: {}", path.display()));
     }
-    if meta.len() == 0 {
+    if let Ok(run_dir) = fs::canonicalize(dir) {
+        if path.starts_with(&run_dir) && !path.starts_with(run_dir.join("checks")) {
+            return Err(format!(
+                "evidence cannot be one of the run folder's own files ({}); write the verdict under {}",
+                path.display(),
+                run_dir.join("checks").display()
+            ));
+        }
+    }
+    let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    if bytes.iter().all(u8::is_ascii_whitespace) {
         return Err(format!("evidence file is empty: {}", path.display()));
     }
-    let sha = content_hash(&path)?;
+    let sha = format!("{:x}", Sha256::digest(&bytes));
     let mut out: Vec<(String, String)> = pairs
         .into_iter()
         .filter(|(k, _)| k != "evidence" && k != "evidence_sha256")
@@ -1233,36 +1371,87 @@ fn with_evidence(
 /// The most lines a section of the review packet may take; the rest is counted, not shown.
 const PACKET_LINES: usize = 400;
 
+const PACKET_LINE_CHARS: usize = 2000;
+const PACKET_BYTES: usize = 64 * 1024;
+
+/// At most `max` lines, each at most PACKET_LINE_CHARS, the whole at most PACKET_BYTES.
 fn clip_lines(text: &str, max: usize) -> String {
     let total = text.lines().count();
-    if total <= max {
-        return text.trim_end().to_string();
+    let cut_line = |line: &str| -> String {
+        match line.char_indices().nth(PACKET_LINE_CHARS) {
+            Some((i, _)) => format!("{}… (line cut)", &line[..i]),
+            None => line.to_string(),
+        }
+    };
+    let shown: Vec<String> = text.lines().take(max).map(cut_line).collect();
+    let mut out = shown.join("\n").trim_end().to_string();
+    if total > max {
+        out.push_str(&format!("\n… {} more lines", total - max));
     }
-    let shown: Vec<&str> = text.lines().take(max).collect();
-    format!("{}\n… {} more lines", shown.join("\n"), total - max)
+    if out.len() > PACKET_BYTES {
+        let mut end = PACKET_BYTES;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+        out.push_str("\n… cut at 64 KiB");
+    }
+    out
 }
 
-/// The newest snapshot of a step before `step` in this run: ("step K", commit).
+/// The base a reviewer should diff against: the snapshot taken before this step
+/// (`sw run snapshot`), else the snapshot of the newest certified step before it.
 fn review_base(top: &str, run: &Path, step: &str) -> Option<(String, String)> {
     let this: u64 = step.parse().ok()?;
-    let prefix = snapshot_ref(run, "step-");
-    let refs = git(
-        Some(top),
-        &[],
-        &[
-            "for-each-ref",
-            "--format=%(refname) %(objectname)",
-            &snapshot_ref(run, ""),
-        ],
-    )?;
-    refs.lines()
-        .filter_map(|line| {
-            let (name, commit) = line.split_once(' ')?;
-            let k: u64 = name.strip_prefix(&prefix)?.parse().ok()?;
-            (k < this).then(|| (k, commit.to_string()))
+    let events = log_events(run).ok()?;
+    let exists = |commit: &str| {
+        git(
+            Some(top),
+            &[],
+            &[
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("{commit}^{{commit}}"),
+            ],
+        )
+        .is_some()
+    };
+    let before = events
+        .iter()
+        .rev()
+        .find(|e| event_is(e, "event", "snapshot") && event_is(e, "step", step))
+        .and_then(|e| e.get("commit").map(value_str))
+        .filter(|c| exists(c));
+    if let Some(commit) = before {
+        return Some((format!("the snapshot before step {step}"), commit));
+    }
+    events
+        .iter()
+        .filter(|e| e.get("certified") == Some(&serde_json::Value::Bool(true)))
+        .filter_map(|e| {
+            let k: u64 = e.get("step").map(value_str)?.parse().ok()?;
+            let commit = e.get("snapshot").map(value_str)?;
+            (k < this && exists(&commit)).then_some((k, commit))
         })
         .max_by_key(|(k, _)| *k)
         .map(|(k, commit)| (format!("step {k}"), commit))
+}
+
+/// Paths in a diff that are nested repositories: their own changes are not in the diff.
+fn nested_repos(diff: &str) -> Vec<String> {
+    let mut current = String::new();
+    let mut found = Vec::new();
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git a/") {
+            current = rest.split(" b/").next().unwrap_or("").to_string();
+        } else if (line.starts_with("+Subproject commit") || line.starts_with("-Subproject commit"))
+            && !found.contains(&current)
+        {
+            found.push(current.clone());
+        }
+    }
+    found
 }
 
 /// The diff a reviewer should read: the last snapshot before this step (or HEAD) against the
@@ -1281,10 +1470,12 @@ fn print_changes(top: &str, run: &Path, step: &str) -> Result<()> {
             }
         },
     };
-    let now = tree_of_worktree(top, true)?;
+    // The current tree goes to a temp store, so a review writes nothing into .git/objects.
+    let store = TempStore::new(top, false)?;
+    let now = stage_tree(top, &store)?;
     let diff = git(
         Some(top),
-        &[],
+        &store.envs(),
         &[
             "diff",
             "--no-color",
@@ -1302,6 +1493,9 @@ fn print_changes(top: &str, run: &Path, step: &str) -> Result<()> {
     } else {
         println!("{}", clip_lines(&diff, PACKET_LINES));
     }
+    for path in nested_repos(&diff) {
+        println!("nested repository {path}: its own changes are not shown; open it");
+    }
     Ok(())
 }
 
@@ -1316,6 +1510,15 @@ fn run_review(run: &Path, step: &str) -> Result<()> {
     let check = plan_step_check(&plan, step).unwrap_or_else(|| "(none in the plan)".to_string());
     println!("Review packet: step {step} of {}", file_name(run));
     println!("What the worker said about this step is left out on purpose; judge the work.");
+    let recorded = log_events(run)?
+        .iter()
+        .find(|e| event_is(e, "event", "plan"))
+        .and_then(|e| e.get("sha256").map(value_str));
+    if recorded.is_some() && recorded != plan_hash(run) {
+        println!(
+            "Note: plan.md changed since the first step was logged; its lines are the worker's text, and the check may not be the one the step was planned with."
+        );
+    }
     for l in plan.lines().map(str::trim) {
         if let Some(goal) = l.strip_prefix("# Goal:") {
             println!("Goal: {}", goal.trim());
@@ -1336,20 +1539,30 @@ fn run_review(run: &Path, step: &str) -> Result<()> {
     }
     if let Some(receipt) = latest_receipt(run, step)? {
         let name = receipt.get("log").map(value_str).unwrap_or_default();
-        let text = fs::read_to_string(run.join("checks").join(&name))
-            .unwrap_or_else(|_| "(output file missing)".to_string());
-        println!(
-            "\nLatest check output (`{}`, exit {}):",
-            receipt.get("cmd").map(value_str).unwrap_or_default(),
-            receipt.get("exit").map(value_str).unwrap_or_default()
-        );
-        println!("{}", clip_lines(&text, PACKET_LINES / 4));
+        let cmd = receipt.get("cmd").map(value_str).unwrap_or_default();
+        let bare = !name.is_empty() && !name.contains(['/', '\\']) && name != "..";
+        let genuine = matches!(receipt.get("ok"), Some(serde_json::Value::Bool(_)));
+        if bare && genuine && command_check(&check) == Some(cmd.as_str()) {
+            let text = fs::read_to_string(run.join("checks").join(&name))
+                .unwrap_or_else(|_| "(output file missing)".to_string());
+            println!(
+                "\nLatest check output (`{cmd}`, exit {}):",
+                receipt.get("exit").map(value_str).unwrap_or_default()
+            );
+            println!("{}", clip_lines(&text, PACKET_LINES / 4));
+        } else {
+            println!(
+                "\nThe latest check receipt for step {step} is stale (the plan's check is not what it ran) and is not shown."
+            );
+        }
     }
-    let verdict = run.join("checks").join(format!("step-{step}-review.md"));
+    let checks = run.join("checks");
+    fs::create_dir_all(&checks).map_err(|e| format!("cannot create {}: {e}", checks.display()))?;
+    let verdict = checks.join(format!("step-{step}-review.md"));
     println!(
         "\nStart from FAIL. Pass only what the changes and the output prove; list each requirement \
          of the check as pass or fail with the evidence. Write the verdict to {} and log it with \
-         `sw run log {} step={step} result=pass|fail evidence={}`.",
+         `sw run log {} step={step} result=pass|fail evidence=\"{}\"`.",
         verdict.display(),
         file_name(run),
         verdict.display()
@@ -2424,6 +2637,11 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                     None => return Err(format!("expected key=value, got '{pair}'")),
                 }
             }
+            if let Some((k, _)) = parsed.iter().find(|(k, _)| SW_KEYS.contains(&k.as_str())) {
+                return Err(format!(
+                    "`{k}` is written by sw itself (receipts, snapshots, certified passes); it cannot be logged by hand"
+                ));
+            }
             let dir = store.resolve_run(&run)?;
             let value = |key: &str| {
                 parsed
@@ -2431,12 +2649,24 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                     .find(|(k, _)| k == key)
                     .map(|(_, v)| v.clone())
             };
-            if let (Some(step), Some(result)) = (value("step"), value("result")) {
+            if let Some(step) = value("step") {
+                let numeric = !step.is_empty()
+                    && step.bytes().all(|b| b.is_ascii_digit())
+                    && (step == "0" || !step.starts_with('0'));
+                if !numeric {
+                    return Err(format!("step must be a number as in plan.md, got '{step}'"));
+                }
+            }
+            if let Some(result) = value("result") {
+                if result != "pass" && result != "fail" {
+                    return Err(format!("result must be pass or fail, got '{result}'"));
+                }
+            }
+            let step_result = (value("step"), value("result"));
+            if let (Some(step), Some(result)) = step_result {
                 let plan = fs::read_to_string(dir.join("plan.md")).unwrap_or_default();
-                let is_command = plan_step_check(&plan, &step)
-                    .as_deref()
-                    .and_then(command_check)
-                    .is_some();
+                let check = plan_step_check(&plan, &step);
+                let is_command = check.as_deref().and_then(command_check).is_some();
                 if result == "pass" && is_command {
                     return Err(format!(
                         "step {step} has a command check; a pass written by hand is not evidence. \
@@ -2444,10 +2674,16 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                     ));
                 }
                 if result == "pass" {
-                    let parsed = with_evidence(parsed, &run, &step)?;
-                    append_event(&dir, &parsed)?;
-                    return Ok(());
+                    // The check the pass was logged against is the plan's, not the caller's.
+                    parsed = with_evidence(parsed, &dir, &run, &step)?
+                        .into_iter()
+                        .filter(|(k, _)| k != "check")
+                        .collect();
+                    if let Some(check) = check {
+                        parsed.push(("check".into(), check));
+                    }
                 }
+                note_plan(&dir)?;
             }
             append_event(&dir, &parsed)?;
         }
@@ -2465,6 +2701,9 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             failing.sort_by_key(|(s, _)| s.parse::<u64>().unwrap_or(0));
             for (step, result) in failing {
                 println!("  step {step}: {result}");
+            }
+            for problem in evidence_problems(&dir)? {
+                println!("  {problem}");
             }
             println!("next: {}", p.next_label());
         }
@@ -2487,7 +2726,7 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
         RunCmd::Next { run } => {
             let dir = store.resolve_run(&run)?;
             let plan = fs::read_to_string(dir.join("plan.md")).unwrap_or_default();
-            let runnable = runnable_steps(&plan, &step_results(&dir));
+            let runnable = runnable_steps(&plan, &step_results(&dir, &plan));
             if !runnable.is_empty() {
                 println!("{}", runnable.join(" "));
             }

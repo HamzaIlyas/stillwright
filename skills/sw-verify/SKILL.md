@@ -48,7 +48,8 @@ When a command can't decide it, run `sw run review latest N` and give the review
 packet and nothing else: it holds the goal, the must-nots, the step and its check, the diff
 since the last snapshot (new files included) and the latest check output, and it leaves out
 what the worker said. The packet ends with the brief ("Start from FAIL. Pass only what the
-changes and the output prove; list each requirement as pass or fail with the evidence") and
+changes and the output prove; list each requirement of the check as pass or fail with the
+evidence") and
 the path the verdict goes to (`<run>/checks/step-N-review.md`). Give the reviewer read-only
 tools; it may open files the packet names, never the run log.
 

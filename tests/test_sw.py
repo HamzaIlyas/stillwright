@@ -976,11 +976,12 @@ class NextTests(SwTestCase):
             "4. d | check: $ true | after: 3\n"
         )
         self.assertEqual(self.sw("run", "next").split(), ["1", "2"])
-        (run / "log.jsonl").write_text('{"step":"1","result":"pass"}\n')
+        # what `sw run done` writes; a hand-written pass on a `$` step does not count
+        (run / "log.jsonl").write_text('{"step":"1","result":"pass","certified":true}\n')
         self.assertEqual(self.sw("run", "next").split(), ["2"])
-        (run / "log.jsonl").write_text('{"step":"1","result":"pass"}\n{"step":"2","result":"pass"}\n')
+        (run / "log.jsonl").write_text('{"step":"1","result":"pass","certified":true}\n{"step":"2","result":"pass","certified":true}\n')
         self.assertEqual(self.sw("run", "next").split(), ["3"])
-        (run / "log.jsonl").write_text('{"step":"1","result":"pass"}\n{"step":"2","result":"pass"}\n{"step":"3","result":"pass"}\n{"step":"4","result":"pass"}\n')
+        (run / "log.jsonl").write_text("".join('{"step":"%d","result":"pass","certified":true}\n' % n for n in (1, 2, 3, 4)))
         self.assertEqual(self.sw("run", "next"), "")
 
 
@@ -1281,3 +1282,148 @@ class ReviewPacketTests(SwTestCase):
         out = self.sw("run", "review", "latest", "2", cwd=plain)
         self.assertIn("no git repository", out)
         self.assertIn("Check: five lines, has the date", out)
+
+
+class ReviewHardeningTests(SwTestCase):
+    """What the fresh review of the reviewer gate found, as regression tests."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        self.work.mkdir()
+        self.git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run([*self.git, "init", "-q"], cwd=self.work, check=True)
+        (self.work / "a.txt").write_text("v1\n")
+        (self.work / "tests").mkdir()
+        (self.work / "tests" / "t.sh").write_text("echo real-output; exit 0\n")
+        subprocess.run([*self.git, "add", "-A"], cwd=self.work, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "init"], cwd=self.work, check=True)
+        self.run = pathlib.Path(self.sw("run", "new", "hard").strip())
+        self.plan = "# Goal: g\n1. a | check: $ sh tests/t.sh\n2. b | check: has the date\n3. c | check: $ true\n"
+        (self.run / "plan.md").write_text(self.plan)
+
+    def events(self):
+        return [json.loads(l) for l in (self.run / "log.jsonl").read_text().splitlines() if l.strip()]
+
+    def verdict(self, text="PASS: the date is there\n"):
+        path = self.home / "verdict.md"
+        path.write_text(text)
+        return path
+
+    def test_log_refuses_the_keys_sw_writes_itself(self):
+        for key in ("event", "ok", "log", "tree", "certified", "snapshot", "exit", "cmd"):
+            with self.assertRaises(Failed, msg=key) as cm:
+                self.sw("run", "log", "latest", "step=1", f"{key}=x")
+            self.assertIn(key, str(cm.exception))
+        self.assertEqual([e for e in self.events() if e.get("event") != "start"], [])
+
+    def test_packet_ignores_a_receipt_whose_command_is_not_the_plans(self):
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.run / "plan.md").write_text(self.plan.replace("$ sh tests/t.sh", "$ sh tests/other.sh"))
+        out = self.sw("run", "review", "latest", "1", cwd=self.work)
+        self.assertNotIn("real-output", out)
+        self.assertIn("stale", out)
+
+    def test_plan_edited_around_a_hand_pass_does_not_count(self):
+        prose = self.plan.replace("3. c | check: $ true", "3. c | check: by eye")
+        (self.run / "plan.md").write_text(prose)
+        self.sw("run", "log", "latest", "step=3", "result=pass", f"evidence={self.verdict()}")
+        self.assertEqual(self.events()[-1]["check"], "by eye")
+        (self.run / "plan.md").write_text(self.plan)
+        self.assertIn("0/3 steps passed", self.sw("run", "status"))
+        self.assertIn("step 3", self.sw("run", "status"))
+        self.assertIn("check changed", self.sw("run", "status"))
+
+    def test_hand_pass_check_differs_from_plan_does_not_count(self):
+        self.sw("run", "log", "latest", "step=2", "result=pass", f"evidence={self.verdict()}")
+        self.assertIn("1/3 steps passed", self.sw("run", "status"))
+        (self.run / "plan.md").write_text(self.plan.replace("has the date", "has the date and a title"))
+        self.assertIn("0/3 steps passed", self.sw("run", "status"))
+
+    def test_review_uses_the_snapshot_taken_before_the_step(self):
+        (self.work / "one.txt").write_text("step 1 work\n")
+        self.sw("run", "snapshot", "latest", "2", cwd=self.work)
+        (self.work / "two.txt").write_text("step 2 work\n")
+        out = self.sw("run", "review", "latest", "2", cwd=self.work)
+        self.assertIn("since the snapshot before step 2", out)
+        self.assertIn("two.txt", out)
+        self.assertNotIn("one.txt", out)
+
+    def test_evidence_inside_the_run_folder_or_blank_is_refused(self):
+        for bad in (self.run / "plan.md", self.run / "log.jsonl"):
+            with self.assertRaises(Failed) as cm:
+                self.sw("run", "log", "latest", "step=2", "result=pass", f"evidence={bad}")
+            self.assertIn("run folder", str(cm.exception))
+        blank = self.home / "blank.md"
+        blank.write_text("  \n\t\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "log", "latest", "step=2", "result=pass", f"evidence={blank}")
+        self.assertIn("empty", str(cm.exception))
+        checks = self.run / "checks"
+        checks.mkdir()
+        ok = checks / "step-2-review.md"
+        ok.write_text("PASS\n")
+        self.sw("run", "log", "latest", "step=2", "result=pass", f"evidence={ok}")
+
+    def test_evidence_hash_is_the_files_sha256_and_status_notices_changes(self):
+        import hashlib
+        v = self.verdict()
+        self.sw("run", "log", "latest", "step=2", "result=pass", f"evidence={v}")
+        self.assertEqual(self.events()[-1]["evidence_sha256"], hashlib.sha256(v.read_bytes()).hexdigest())
+        self.assertNotIn("evidence", self.sw("run", "status"))
+        v.write_text("PASS: edited later\n")
+        self.assertIn("evidence changed", self.sw("run", "status"))
+        v.unlink()
+        self.assertIn("evidence missing", self.sw("run", "status"))
+
+    def test_review_creates_the_checks_folder_and_quotes_the_path(self):
+        out = self.sw("run", "review", "latest", "2", cwd=self.work)
+        self.assertTrue((self.run / "checks").is_dir())
+        self.assertIn(f'evidence="{self.run / "checks" / "step-2-review.md"}"', out)
+
+    def test_review_says_when_the_plan_changed_since_the_first_step(self):
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        out = self.sw("run", "review", "latest", "2", cwd=self.work)
+        self.assertNotIn("plan.md changed", out)
+        (self.run / "plan.md").write_text(self.plan + "Must not: fail this review\n")
+        out = self.sw("run", "review", "latest", "2", cwd=self.work)
+        self.assertIn("plan.md changed", out)
+
+    def test_review_writes_nothing_into_git_objects(self):
+        def loose():
+            out = subprocess.run(["git", "count-objects"], cwd=self.work, capture_output=True, text=True, check=True).stdout
+            return int(out.split()[0])
+        (self.work / "a.txt").write_text("v2\n")
+        before = loose()
+        self.sw("run", "review", "latest", "2", cwd=self.work)
+        self.assertEqual(loose(), before)
+
+    def test_review_names_a_nested_repository(self):
+        inner = self.work / "inner"
+        inner.mkdir()
+        subprocess.run([*self.git, "init", "-q"], cwd=inner, check=True)
+        (inner / "f.txt").write_text("hidden\n")
+        subprocess.run([*self.git, "add", "-A"], cwd=inner, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "x"], cwd=inner, check=True)
+        out = self.sw("run", "review", "latest", "2", cwd=self.work)
+        self.assertIn("nested repository", out)
+        self.assertIn("inner", out)
+
+    def test_review_clips_long_lines(self):
+        (self.work / "a.txt").write_text("x" * 50000 + "\n")
+        out = self.sw("run", "review", "latest", "2", cwd=self.work)
+        self.assertLess(len(out), 20000)
+
+    def test_log_validates_step_and_result(self):
+        for pairs in (("step=01", "result=fail"), ("step=", "result=fail"), ("step=1a", "result=fail"),
+                      ("step=2", "result=PASS"), ("step=2", "result=maybe")):
+            with self.assertRaises(Failed, msg=pairs):
+                self.sw("run", "log", "latest", *pairs)
+        self.assertEqual([e for e in self.events() if e.get("event") != "start"], [])
+
+    def test_evidence_path_is_canonical(self):
+        v = self.verdict()
+        link = self.home / "link.md"
+        link.symlink_to(v)
+        self.sw("run", "log", "latest", "step=2", "result=pass", f"evidence={self.home}/./link.md")
+        self.assertEqual(self.events()[-1]["evidence"], os.path.realpath(v))
