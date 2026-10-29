@@ -104,6 +104,18 @@ Two earlier priced rounds were discarded: headless sessions had been denied Bash
 writes by my own harness settings, so no agent could run tests; the receipts from those rounds
 measured permission failures, not work.
 
+## Correction (2026-10-29)
+
+The "plain" side of every round above was not plain. The harness disabled only the Stillwright plugin
+and left the author's other Claude Code settings loaded (another skills plugin with a
+"verify before claiming done" skill, a rules set, and dozens of agents); the plain code run's own
+report mentions one of those agents ("I also didn't run the code-reviewer agent"). So the tables
+compare Stillwright with a helped baseline, not with nothing, and nobody else can reproduce that
+baseline. The numbers stay as they were measured; read "plain" as "the author's setup without
+Stillwright". The next round fixes this: both sides run with no settings and no connectors loaded
+(`--setting-sources "" --strict-mcp-config`), verified field by field in the session's init event.
+Hand-test notes: [`evals/hand-tests/`](evals/hand-tests/).
+
 ## Limits of this eval
 
 - Three tasks, one run each per side. Enough to see patterns, not to put error bars on them.
