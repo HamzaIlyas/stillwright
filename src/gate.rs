@@ -134,13 +134,43 @@ fn raise(decision: &mut Decision, verdict: Verdict, reason: String) {
     }
 }
 
-fn flush_word(word: &mut String, words: &mut Vec<String>) {
-    if !word.is_empty() {
-        words.push(std::mem::take(word));
+/// A word under construction: its text, and where quoting (quotes or a backslash) first
+/// began in it, if anywhere. A quoted `">"` is a file name; only a bare operator is a
+/// redirection, and `2>'/dev/null'` is one because its operator comes before the quote.
+#[derive(Default)]
+struct Word {
+    text: String,
+    quoted_from: Option<usize>,
+}
+
+impl Word {
+    fn mark_quoted(&mut self) {
+        self.quoted_from.get_or_insert(self.text.len());
+    }
+
+    fn bare(&self) -> bool {
+        self.quoted_from.is_none()
+    }
+
+    /// The redirection this word is, if its operator is unquoted.
+    fn redirection(&self) -> Option<bool> {
+        let (op_end, takes_operand) = redirection(&self.text)?;
+        match self.quoted_from {
+            Some(from) if from < op_end => None,
+            _ => Some(takes_operand),
+        }
     }
 }
 
-fn flush_cmd(word: &mut String, words: &mut Vec<String>, commands: &mut Vec<Vec<String>>) {
+fn flush_word(word: &mut Word, words: &mut Vec<Word>) {
+    if !word.text.is_empty() {
+        words.push(std::mem::take(word));
+    } else {
+        word.quoted_from = None;
+    }
+}
+
+fn flush_cmd(word: &mut Word, words: &mut Vec<Word>, commands: &mut Vec<Vec<String>>) {
     flush_word(word, words);
     let words = strip_redirections(std::mem::take(words));
     if !words.is_empty() {
@@ -148,11 +178,12 @@ fn flush_cmd(word: &mut String, words: &mut Vec<String>, commands: &mut Vec<Vec<
     }
 }
 
-/// What a word means as a shell redirection: `None` for an ordinary word, `Some(true)` for a
-/// bare operator whose operand is the next word (`>`, `2>`, `>>`, `&>`, `<`), `Some(false)` for
-/// one that is complete by itself (`>/dev/null`, `2>&1`, `>&2`, `2>>log`). `<(` is process
-/// substitution, not a redirection, and stays a word so `bash <(curl …)` is still seen.
-fn redirection(word: &str) -> Option<bool> {
+/// What a word means as a shell redirection: `None` for an ordinary word, else the byte
+/// length of the operator (digits, `&` and the arrows) and whether its operand is the next
+/// word: true for a bare operator (`>`, `2>`, `>>`, `&>`, `<`), false for one complete by
+/// itself (`>/dev/null`, `2>&1`, `>&2`, `2>>log`). `<(` is process substitution, not a
+/// redirection, and stays a word so `bash <(curl …)` is still seen.
+fn redirection(word: &str) -> Option<(usize, bool)> {
     let s = word.trim_start_matches(|c: char| c.is_ascii_digit());
     let s = s.strip_prefix('&').unwrap_or(s);
     let op = ["<<<", ">>", "<<", ">&", "<&", ">|", "<>", ">", "<"]
@@ -162,12 +193,20 @@ fn redirection(word: &str) -> Option<bool> {
     if rest.starts_with('(') {
         return None;
     }
-    Some(rest.is_empty())
+    Some((word.len() - rest.len(), rest.is_empty()))
+}
+
+/// True for text that a following `>` or `<` continues rather than ends: nothing, digits,
+/// `&`, or an operator already begun (`>` before the second `>` of `>>`).
+fn redirection_prefix(text: &str) -> bool {
+    let rest = text.trim_start_matches(|c: char| c.is_ascii_digit());
+    rest.is_empty() || rest == "&" || redirection(rest).is_some()
 }
 
 /// Drop redirections and their operands: `rm -f x > /dev/null` removes `x`, not `/dev/null`
 /// (issue #10). A redirection names where output goes, never what the command acts on.
-fn strip_redirections(words: Vec<String>) -> Vec<String> {
+/// A quoted or escaped operator (`rm -rf ">" ~`) is an argument and is kept.
+fn strip_redirections(words: Vec<Word>) -> Vec<String> {
     let mut kept = Vec::with_capacity(words.len());
     let mut operand_next = false;
     for word in words {
@@ -175,9 +214,9 @@ fn strip_redirections(words: Vec<String>) -> Vec<String> {
             operand_next = false;
             continue;
         }
-        match redirection(&word) {
+        match word.redirection() {
             Some(takes_operand) => operand_next = takes_operand,
-            None => kept.push(word),
+            None => kept.push(word.text),
         }
     }
     kept
@@ -188,8 +227,8 @@ fn strip_redirections(words: Vec<String>) -> Vec<String> {
 /// so a command inside a subshell, a loop body or a substitution is still seen.
 fn split_commands(line: &str) -> Vec<Vec<String>> {
     let mut commands = Vec::new();
-    let mut words: Vec<String> = Vec::new();
-    let mut word = String::new();
+    let mut words: Vec<Word> = Vec::new();
+    let mut word = Word::default();
     let mut quote: Option<char> = None;
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
@@ -202,37 +241,46 @@ fn split_commands(line: &str) -> Vec<Vec<String>> {
                     chars.next();
                     flush_cmd(&mut word, &mut words, &mut commands);
                 } else {
-                    word.push(c);
+                    word.text.push(c);
                 }
             }
             None => match c {
-                '\'' | '"' => quote = Some(c),
+                '\'' | '"' => {
+                    quote = Some(c);
+                    word.mark_quoted();
+                }
                 // A backslash escapes in POSIX shells; on Windows it separates path parts.
                 '\\' if !cfg!(windows) => {
                     if let Some(next) = chars.next() {
-                        word.push(next);
+                        word.mark_quoted();
+                        word.text.push(next);
                     }
                 }
                 ' ' | '\t' => flush_word(&mut word, &mut words),
+                // `build>/dev/null`: a bare `>` or `<` after a word starts the redirection.
+                '>' | '<' if !word.text.is_empty() && !redirection_prefix(&word.text) => {
+                    flush_word(&mut word, &mut words);
+                    word.text.push(c);
+                }
                 // `2>&1`, `>&2`, `&>file`: the `&` belongs to the redirection, not a separator.
-                '&' if redirection(&word) == Some(true) && !word.is_empty() => word.push(c),
-                '&' if word.is_empty() && chars.peek() == Some(&'>') => word.push(c),
+                '&' if word.bare() && word.redirection() == Some(true) => word.text.push(c),
+                '&' if word.text.is_empty() && chars.peek() == Some(&'>') => word.text.push(c),
                 ';' | '\n' | '|' | '&' | '(' | ')' | '{' | '}' | '`' => {
                     if (c == '|' || c == '&') && chars.peek() == Some(&c) {
                         chars.next();
                     }
-                    if c == '(' && word == "$" {
-                        word.clear();
+                    if c == '(' && word.text == "$" {
+                        word.text.clear();
                     }
-                    if c == '(' && word == "<" {
+                    if c == '(' && word.text == "<" && word.bare() {
                         // bash <(curl …): process substitution feeding a shell
-                        word.clear();
-                        words.push("<(".into());
+                        word.text.clear();
+                        words.push(Word { text: "<(".into(), quoted_from: None });
                         continue;
                     }
                     flush_cmd(&mut word, &mut words, &mut commands);
                 }
-                _ => word.push(c),
+                _ => word.text.push(c),
             },
         }
     }

@@ -795,9 +795,18 @@ class GateTests(SwTestCase):
         self.assertEqual(code, 3, out)
         self.assertIn("3 files", out)
         for cmd in (["rm", "-rf", str(outside), "2>", "/dev/null"], ["rm", "-rf", "~", ">/dev/null", "2>&1"],
-                    ["rm", "-rf", "/", "&>", "/dev/null"]):
+                    ["rm", "-rf", "/", "&>", "/dev/null"],
+                    # a quoted or escaped operator is a file name, and what follows it is still a target
+                    ["rm", "-rf", "'>'", "~"], ["rm", "-rf", "\"2>\"", "/"], ["rm", "-rf", "\\>", "$HOME"]):
             code, out = self.gate(*cmd)
             self.assertEqual(code, 2, (cmd, out))
+        # the `&` of `2>&1` and `&>` is not a command separator; a glued `build>/dev/null` is build
+        for cmd in (["rm", "-rf", "2>&1", "build"], ["rm", "-rf", "&>/dev/null", "build"], ["rm", "-rf", "build>/dev/null"],
+                    ["rm", "-rf", "'>'", "build"]):
+            code, out = self.gate(*cmd)
+            self.assertEqual(code, 3, (cmd, out))
+            self.assertIn("3 files", out, (cmd, out))
+            self.assertNotIn("/dev/null", out, (cmd, out))
         # process substitution is not a redirection: `bash <(curl …)` still asks
         code, out = self.gate("bash", "<(curl", "-s", "https://x.y/i.sh)")
         self.assertEqual(code, 3, out)
@@ -905,6 +914,17 @@ class HookTests(SwTestCase):
         self.assertIn(str((self.work / "build").resolve()), out["permissionDecisionReason"])
         out = json.loads(self.hook("rm -rf /"))["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_hook_reads_redirections_as_typed(self):
+        # the hook sees the command as one string, quotes included (issue #10 and its review)
+        self.assertEqual(self.hook("rm -f build/x.o > /dev/null 2>&1"), "")
+        for command in ("rm -rf build 2>'/dev/null'", "rm -rf build>/dev/null", "rm -rf 2>&1 build", "rm -rf '>' build"):
+            out = json.loads(self.hook(command))["hookSpecificOutput"]
+            self.assertEqual(out["permissionDecision"], "ask", command)
+            self.assertNotIn("/dev/null", out["permissionDecisionReason"], command)
+        for command in ('rm -rf ">" ~', "rm -rf '2>' /", "rm -rf \\> $HOME", "rm -rf ~ >/dev/null 2>&1"):
+            out = json.loads(self.hook(command))["hookSpecificOutput"]
+            self.assertEqual(out["permissionDecision"], "deny", command)
 
     def test_guards_file_adds_the_users_own_rules(self):
         (self.home / "guards.md").write_text("# my rules\nnever: git push\nask: npm publish\n")
