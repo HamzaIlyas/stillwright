@@ -142,9 +142,45 @@ fn flush_word(word: &mut String, words: &mut Vec<String>) {
 
 fn flush_cmd(word: &mut String, words: &mut Vec<String>, commands: &mut Vec<Vec<String>>) {
     flush_word(word, words);
+    let words = strip_redirections(std::mem::take(words));
     if !words.is_empty() {
-        commands.push(std::mem::take(words));
+        commands.push(words);
     }
+}
+
+/// What a word means as a shell redirection: `None` for an ordinary word, `Some(true)` for a
+/// bare operator whose operand is the next word (`>`, `2>`, `>>`, `&>`, `<`), `Some(false)` for
+/// one that is complete by itself (`>/dev/null`, `2>&1`, `>&2`, `2>>log`). `<(` is process
+/// substitution, not a redirection, and stays a word so `bash <(curl …)` is still seen.
+fn redirection(word: &str) -> Option<bool> {
+    let s = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    let s = s.strip_prefix('&').unwrap_or(s);
+    let op = ["<<<", ">>", "<<", ">&", "<&", ">|", "<>", ">", "<"]
+        .iter()
+        .find(|op| s.starts_with(*op))?;
+    let rest = &s[op.len()..];
+    if rest.starts_with('(') {
+        return None;
+    }
+    Some(rest.is_empty())
+}
+
+/// Drop redirections and their operands: `rm -f x > /dev/null` removes `x`, not `/dev/null`
+/// (issue #10). A redirection names where output goes, never what the command acts on.
+fn strip_redirections(words: Vec<String>) -> Vec<String> {
+    let mut kept = Vec::with_capacity(words.len());
+    let mut operand_next = false;
+    for word in words {
+        if operand_next {
+            operand_next = false;
+            continue;
+        }
+        match redirection(&word) {
+            Some(takes_operand) => operand_next = takes_operand,
+            None => kept.push(word),
+        }
+    }
+    kept
 }
 
 /// Split a command line into simple commands, honouring quotes. Separators: `;`, `&&`,
@@ -178,6 +214,9 @@ fn split_commands(line: &str) -> Vec<Vec<String>> {
                     }
                 }
                 ' ' | '\t' => flush_word(&mut word, &mut words),
+                // `2>&1`, `>&2`, `&>file`: the `&` belongs to the redirection, not a separator.
+                '&' if redirection(&word) == Some(true) && !word.is_empty() => word.push(c),
+                '&' if word.is_empty() && chars.peek() == Some(&'>') => word.push(c),
                 ';' | '\n' | '|' | '&' | '(' | ')' | '{' | '}' | '`' => {
                     if (c == '|' || c == '&') && chars.peek() == Some(&c) {
                         chars.next();
