@@ -275,7 +275,10 @@ fn split_commands(line: &str) -> Vec<Vec<String>> {
                     if c == '(' && word.text == "<" && word.bare() {
                         // bash <(curl …): process substitution feeding a shell
                         word.text.clear();
-                        words.push(Word { text: "<(".into(), quoted_from: None });
+                        words.push(Word {
+                            text: "<(".into(),
+                            quoted_from: None,
+                        });
                         continue;
                     }
                     flush_cmd(&mut word, &mut words, &mut commands);
