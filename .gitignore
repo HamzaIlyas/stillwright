@@ -4,3 +4,4 @@ target/
 .venv/
 .DS_Store
 .example-home/
+uv.lock
