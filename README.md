@@ -175,8 +175,7 @@ Cost is measured, not assumed: the harness, the price table and the cache linter
 
 ## Who runs it
 
-One person, [Hamza Ilyas](https://github.com/HamzaIlyas), building it at
-[Folvix](https://huggingface.co/Folvix). Questions and ideas:
+One person, [Hamza Ilyas](https://github.com/HamzaIlyas). Questions and ideas:
 [Discussions](https://github.com/HamzaIlyas/stillwright/discussions). Bugs:
 [issues](https://github.com/HamzaIlyas/stillwright/issues/new?template=idea.yml), read daily.
 
