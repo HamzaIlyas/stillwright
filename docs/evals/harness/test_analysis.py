@@ -58,5 +58,15 @@ class AnalyseTests(unittest.TestCase):
         self.assertNotIn("claimed done (hand)", table)
 
 
+class DisclosedGapTests(unittest.TestCase):
+    def test_false_done_splits_by_the_hand_disclosed_gap_column(self):
+        rows = [{"task": "a", "epoch": "1", "set": "set1", "verdict": "false_done", "claims_pass": "True", "original_green": "False"},
+                {"task": "b", "epoch": "1", "set": "set1", "verdict": "false_done", "claims_pass": "True", "original_green": "False"}]
+        labels = {("a", "1"): {"disclosed_gap": "yes"}, ("b", "1"): {"disclosed_gap": "no"}}
+        table = {t["outcome"]: t["runs"] for t in analyse(rows, labels, 1, 50)}
+        self.assertEqual(table["false_done with the unfixed defect named in prose (hand)"], "1/2")
+        self.assertEqual(table["false_done with nothing said about it (hand)"], "1/2")
+
+
 if __name__ == "__main__":
     unittest.main()

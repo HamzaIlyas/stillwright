@@ -3,7 +3,7 @@
 
     validate <tasks_root> [--tasks id ...] [--skip-independent] [--reps 5]
         Per task: the shipped module fails visible and hidden; the oracle passes visible and hidden `reps`
-        times; every wrong patch passes visible and fails hidden; the independent solution passes hidden;
+        times; every wrong patch passes visible and fails hidden; every hidden/independent* solution passes hidden (at least --min-independent of them);
         for a recipe-3 task the flaky test fails 3+ of 20 runs as shipped and 0 of 20 with the oracle.
         Exit 0 only when every task passes every check. Prints one line per check that fails.
     manifest <tasks_root>
@@ -11,7 +11,7 @@
         sha256 of a deterministic tar of all task folders (the archive hash that binds the runs, section 8).
 
 Task folder layout: instruction.md, <module>.py (+ files), tests/test_visible.py, hidden/test_hidden.py,
-hidden/oracle/<files>, hidden/wrong/<patch>.py, hidden/independent/<files>, task.json with
+hidden/oracle/<files>, hidden/wrong/<patch>.py, hidden/independent*/<files>, task.json with
 {"id", "recipe", "module", "protected_paths", "honest_outcome", "wrong_patches": {patch: target}, "flaky_test"?}.
 Run under the harness python: uv run --python 3.12 --with pytest python3 own_tasks.py ...
 """
@@ -75,7 +75,7 @@ def oracle_patches(task: pathlib.Path, folder: str) -> dict[str, pathlib.Path]:
     return {str(p.relative_to(root)): p for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts}
 
 
-def validate_task(task: pathlib.Path, reps: int = 5, skip_independent: bool = False) -> Result:
+def validate_task(task: pathlib.Path, reps: int = 5, skip_independent: bool = False, min_independent: int = 1) -> Result:
     meta = json.loads((task / "task.json").read_text())
     visible, hidden = task / "tests" / "test_visible.py", task / "hidden" / "test_hidden.py"
     failures, details = [], {}
@@ -110,12 +110,12 @@ def validate_task(task: pathlib.Path, reps: int = 5, skip_independent: bool = Fa
         g, info = run_suite(task, hidden, {target: patch})
         check(f"wrong patch {patch.name} fails hidden", not g, info)
     if not skip_independent:
-        ind = task / "hidden" / "independent"
-        if not ind.exists() or not any(ind.rglob("*.py")):
-            check("independent solution present", False, "hidden/independent missing")
-        else:
-            g, info = run_suite(task, hidden, oracle_patches(task, "independent"))
-            check("independent solution passes hidden", g, info)
+        folders = [d for d in sorted((task / "hidden").glob("independent*")) if d.is_dir() and any(d.rglob("*.py"))]
+        check(f"{min_independent} independent solution(s) present", len(folders) >= min_independent,
+              f"{len(folders)} found under hidden/independent*")
+        for d in folders:
+            g, info = run_suite(task, hidden, oracle_patches(task, d.name))
+            check(f"independent solution {d.name} passes hidden", g, info)
     flaky = meta.get("flaky_test")
     if flaky:
         shipped = sum(1 for _ in range(20) if not run_suite(task, visible, select=flaky)[0])
@@ -159,6 +159,7 @@ def main() -> int:
     v.add_argument("root")
     v.add_argument("--tasks", nargs="*")
     v.add_argument("--skip-independent", action="store_true")
+    v.add_argument("--min-independent", type=int, default=1, help="how many hidden/independent* folders a task must have")
     v.add_argument("--reps", type=int, default=5)
     m = sub.add_parser("manifest")
     m.add_argument("root")
@@ -167,7 +168,7 @@ def main() -> int:
     if a.cmd == "validate":
         bad = 0
         for d in task_dirs(root, a.tasks):
-            r = validate_task(d, reps=a.reps, skip_independent=a.skip_independent)
+            r = validate_task(d, reps=a.reps, skip_independent=a.skip_independent, min_independent=a.min_independent)
             print(f"{r.task:8} {'ok' if r.ok else 'FAIL'}  {sum(1 for c in r.details.values() if c[0])}/{len(r.details)} checks")
             for f in r.failures:
                 print("   ", f)
