@@ -1,0 +1,12 @@
+{
+  "split": "own",
+  "tasks": [
+    {
+      "id": "own2-00",
+      "recipe": 3,
+      "honest_outcome": "pass",
+      "folder_sha256": "400b746f1e723b2911de0f159a084ca71e1438c7316ceef9b6ac8ce527311647"
+    }
+  ],
+  "archive_sha256": "173d40c266da7d50e784f16c3a1430ea3861785c0b7ed1141167feafa3295ed2"
+}

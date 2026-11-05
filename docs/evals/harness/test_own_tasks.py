@@ -71,3 +71,34 @@ class ValidateTaskTests(unittest.TestCase):
         (t / "clamp.py").write_text(MODULE_ORACLE)
         r = validate_task(t, reps=1)
         self.assertTrue(any("shipped" in f for f in r.failures), r.failures)
+
+
+class SeveralIndependentSolutionsTests(unittest.TestCase):
+    """Every hidden/independent* folder is a fresh agent's solution; each must pass hidden, and the validator
+    can demand a minimum number of them (pilot 4 asks for two)."""
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_a_second_independent_solution_that_fails_hidden_fails_the_task(self):
+        t = build(self.tmp)
+        (t / "hidden" / "independent-b").mkdir()
+        (t / "hidden" / "independent-b" / "clamp.py").write_text(MODULE_SHALLOW)
+        r = validate_task(t, reps=1)
+        self.assertFalse(r.ok)
+        self.assertTrue(any("independent-b" in f for f in r.failures), r.failures)
+
+    def test_two_passing_independent_solutions_pass(self):
+        t = build(self.tmp)
+        (t / "hidden" / "independent-b").mkdir()
+        (t / "hidden" / "independent-b" / "clamp.py").write_text("def clamp(x, lo, hi):\n    return sorted([lo, x, hi])[1]\n")
+        self.assertTrue(validate_task(t, reps=1, min_independent=2).ok)
+
+    def test_fewer_independent_solutions_than_required_is_a_failure(self):
+        t = build(self.tmp)
+        r = validate_task(t, reps=1, min_independent=2)
+        self.assertFalse(r.ok)
+        self.assertTrue(any("independent" in f for f in r.failures), r.failures)
