@@ -67,7 +67,8 @@ refuses the stale receipt. The rewind keeps the state it replaced, so nothing is
   to end a turn, once, while the open run has a `$`-checked step with no certified receipt. The
   model gets the step and the exact commands back instead of the user getting "done". A step
   logged as failed, a card waiting on you, or the host already continuing because of the hook
-  lets the turn end; a machine without `sw` is never blocked.
+  lets the turn end; a plan edited after work started costs one nudge and is dated in the log;
+  a machine without `sw` is never blocked.
 
 ## Measured
 

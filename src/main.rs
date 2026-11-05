@@ -1820,6 +1820,7 @@ fn run_cwd(run: &Path) -> Option<String> {
         .into_iter()
         .find(|e| event_is(e, "event", "start"))
         .and_then(|e| e.get("cwd").map(value_str))
+        .filter(|cwd| !cwd.is_empty())
 }
 
 /// The step's title: the words between `N.` and the first `|`.
@@ -1834,17 +1835,48 @@ fn plan_step_title(plan: &str, step: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Why this turn may not end yet, or `None` when it may.
-fn stop_verdict(store: &Store, here: &Path, host_continuing: bool) -> Result<Option<String>> {
-    if host_continuing {
-        // The host is already continuing because of this hook: one nudge is the rule, so a
-        // step that stays unproven can never trap the session.
-        return Ok(None);
-    }
-    let Some(dir) = open_run_here(store, here)? else {
+/// Open runs started in `here` or in a folder above it. A run started in a subfolder is not
+/// this session's, and a session opened above the run folder is not the run's either, so a
+/// Stop hook in `~` is never held by a project underneath.
+fn open_runs_over(store: &Store, here: &Path) -> Result<Vec<PathBuf>> {
+    let here = fs::canonicalize(here).unwrap_or_else(|_| here.to_path_buf());
+    Ok(store
+        .runs()?
+        .into_iter()
+        .filter(|dir| {
+            run_cwd(dir).is_some_and(|c| here.starts_with(PathBuf::from(c)))
+                && Progress::of(dir).next.is_some()
+        })
+        .collect())
+}
+
+/// Whether plan.md differs from the last hash on record; when it does, the new hash is
+/// appended, so the edit is dated in the log and the next look finds it recorded.
+fn plan_drift(run: &Path) -> Result<Option<(String, String)>> {
+    let Some(now) = plan_hash(run) else {
         return Ok(None);
     };
-    let name = file_name(&dir);
+    let last = log_events(run)?
+        .into_iter()
+        .rev()
+        .find(|e| event_is(e, "event", "plan"))
+        .and_then(|e| e.get("sha256").map(value_str));
+    match last {
+        Some(then) if then != now => {
+            let mut event = serde_json::Map::new();
+            event.insert("event".into(), "plan".into());
+            event.insert("sha256".into(), now.clone().into());
+            event.insert("changed".into(), true.into());
+            append_json(run, event)?;
+            Ok(Some((then, now)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Why this run may not let the turn end yet, or `None` when it may.
+fn stop_reason(store: &Store, dir: &Path) -> Result<Option<String>> {
+    let name = file_name(dir);
     let cards: Vec<Card> = store.load("inbox.json")?;
     let waiting = cards
         .iter()
@@ -1852,22 +1884,33 @@ fn stop_verdict(store: &Store, here: &Path, host_continuing: bool) -> Result<Opt
     if waiting {
         return Ok(None);
     }
+    note_plan(dir)?;
+    if let Some((then, now)) = plan_drift(dir)? {
+        return Ok(Some(format!(
+            "stillwright: run {name}: plan.md changed after work started (was {}, now {}), so this \
+             turn cannot end on the old plan. The edit is now on record; if it is intended, say \
+             why in the log (`sw run log {name} note=\"plan: <what changed and why>\"`), then stop again.",
+            short(&then),
+            short(&now)
+        )));
+    }
     let plan = fs::read_to_string(dir.join("plan.md")).unwrap_or_default();
-    let progress = Progress::of(&dir);
-    let events = log_events(&dir)?;
-    for step in &progress.steps {
-        if progress.results.get(step).map(String::as_str) == Some("pass") {
-            continue;
-        }
-        let Some(check) = plan_step_check(&plan, step) else {
+    let results = step_results(dir, &plan);
+    let events = log_events(dir)?;
+    for step in runnable_steps(&plan, &results) {
+        let Some(check) = plan_step_check(&plan, &step) else {
             continue;
         };
         if command_check(&check).is_none() {
             continue;
         }
+        if outward_of(&plan, &step).is_some() && consent(store, dir).is_err() {
+            // Held until the user says yes: waiting is the right thing to do.
+            continue;
+        }
         // The last word on the step: a receipt from `sw run check`, or a hand-logged result.
         let last = events.iter().rev().find(|e| {
-            event_is(e, "step", step)
+            event_is(e, "step", &step)
                 && (event_is(e, "event", "receipt") || e.contains_key("result"))
         });
         let state = match last {
@@ -1883,13 +1926,29 @@ fn stop_verdict(store: &Store, here: &Path, host_continuing: bool) -> Result<Opt
             Some(e) if e.get("result").map(value_str).as_deref() == Some("fail") => continue,
             Some(_) => "has a pass logged by hand, which does not count for a `$` check",
         };
-        let title = plan_step_title(&plan, step);
+        let title = plan_step_title(&plan, &step);
         return Ok(Some(format!(
             "stillwright: run {name} step {step} ({title}) {state}, so this turn cannot end as done. \
              Run `sw run check {name} {step}` and then `sw run done {name} {step}`. \
              If the step is not done, say so: `sw run log {name} step={step} result=fail note=<why>`. \
              If you are waiting on the user, add a card (`sw inbox add ask \"<question>\" --run {name}`), then stop again."
         )));
+    }
+    Ok(None)
+}
+
+/// Why this turn may not end yet, or `None` when it may. Every open run started here or above
+/// is asked, so a second run cannot shadow the first.
+fn stop_verdict(store: &Store, here: &Path, host_continuing: bool) -> Result<Option<String>> {
+    if host_continuing {
+        // The host is already continuing because of this hook: one nudge is the rule, so a
+        // step that stays unproven can never trap the session.
+        return Ok(None);
+    }
+    for dir in open_runs_over(store, here)? {
+        if let Some(reason) = stop_reason(store, &dir)? {
+            return Ok(Some(reason));
+        }
     }
     Ok(None)
 }

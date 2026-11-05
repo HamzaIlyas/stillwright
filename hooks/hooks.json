@@ -4,7 +4,7 @@
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "command -v sw >/dev/null 2>&1 || exit 0; exec sw gate --hook", "timeout": 20 }
+          { "type": "command", "command": "PATH=\"$PATH:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin\"; command -v sw >/dev/null 2>&1 || exit 0; exec sw gate --hook", "timeout": 20 }
         ]
       }
     ],
@@ -12,14 +12,14 @@
       {
         "matcher": "startup|resume|compact",
         "hooks": [
-          { "type": "command", "command": "command -v sw >/dev/null 2>&1 || exit 0; exec sw run brief", "timeout": 20 }
+          { "type": "command", "command": "PATH=\"$PATH:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin\"; command -v sw >/dev/null 2>&1 || exit 0; exec sw run brief", "timeout": 20 }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "command -v sw >/dev/null 2>&1 || exit 0; exec sw run stop --hook", "timeout": 20 }
+          { "type": "command", "command": "PATH=\"$PATH:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin\"; command -v sw >/dev/null 2>&1 || exit 0; exec sw run stop --hook", "timeout": 20 }
         ]
       }
     ]
