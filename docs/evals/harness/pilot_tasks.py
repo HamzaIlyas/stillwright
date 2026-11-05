@@ -2,11 +2,14 @@
 """Pick and verify the pilot task set from an exported ImpossibleBench pool.
 
     select <pool_split_dir> <out_dir> [--seed 20261105] [--n 10]
-        Sorted task ids, one seeded draw of n+1: the first n are the pilot set (copied to <out_dir>/<id>),
-        the last one is the dry-run task (copied to <out_dir>/../dry/<id>). Writes <out_dir>/manifest.json.
+        Sorted task ids, one seeded shuffle; walking it, the first n tasks whose visible and original test
+        files both parse are the pilot set (copied to <out_dir>/<id>), the next one is the dry-run task
+        (copied to <out_dir>/../dry/<id>). Tasks skipped for a syntax error are listed in the manifest.
+        Writes <out_dir>/manifest.json.
     verify <out_dir>
         For every task in the manifest: folder hash unchanged, visible and original tests differ, test
-        hashes match task.json, and the untouched stub fails the visible suite under the grader command.
+        hashes match task.json, both test files parse, and the untouched stub fails the visible suite under
+        the grader command.
         Exit 0 only if all hold.
 
 Run under the harness python: uv run --python 3.12 --with pytest python3 pilot_tasks.py ...
@@ -14,6 +17,7 @@ Run under the harness python: uv run --python 3.12 --with pytest python3 pilot_t
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import pathlib
@@ -47,10 +51,27 @@ def task_ids(pool: pathlib.Path) -> list[str]:
     return sorted(p.name for p in pool.iterdir() if (p / "task.json").exists())
 
 
+def tests_parse(task: pathlib.Path) -> bool:
+    for rel in ("tests/test_visible.py", "hidden/test_original.py"):
+        try:
+            ast.parse((task / rel).read_text())
+        except SyntaxError:
+            return False
+    return True
+
+
 def select(pool: pathlib.Path, out: pathlib.Path, seed: int, n: int) -> int:
     ids = task_ids(pool)
-    draw = random.Random(seed).sample(ids, n + 1)
-    chosen, dry = draw[:n], draw[n]
+    order = random.Random(seed).sample(ids, len(ids))
+    chosen, skipped = [], []
+    for tid in order:
+        if not tests_parse(pool / tid):
+            skipped.append(tid)
+        else:
+            chosen.append(tid)
+        if len(chosen) == n + 1:
+            break
+    chosen, dry = chosen[:n], chosen[n]
     out.mkdir(parents=True, exist_ok=True)
     dry_dir = out.parent / "dry"
     dry_dir.mkdir(parents=True, exist_ok=True)
@@ -63,9 +84,10 @@ def select(pool: pathlib.Path, out: pathlib.Path, seed: int, n: int) -> int:
         tasks.append({"id": tid, "folder_sha256": folder_sha256(out / tid),
                       "visible_test_sha256": meta["visible_test_sha256"], "original_test_sha256": meta["original_test_sha256"]})
     manifest = {"seed": seed, "pool_dir": str(pool), "pool_size": len(ids), "pool_ids_sha256": sha256_bytes("\n".join(ids).encode()),
-                "split": "conflicting", "tasks": tasks, "dry_task": {"id": dry, "folder_sha256": folder_sha256(dry_dir / dry)}}
+                "split": "conflicting", "tasks": tasks, "dry_task": {"id": dry, "folder_sha256": folder_sha256(dry_dir / dry)},
+                "skipped_syntax_error": skipped}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    print(f"pilot set ({n}): {' '.join(sorted(chosen))}\ndry-run task: {dry}\nmanifest: {out / 'manifest.json'}")
+    print(f"pilot set ({n}): {' '.join(sorted(chosen))}\ndry-run task: {dry}\nskipped (syntax error in a test file): {skipped}\nmanifest: {out / 'manifest.json'}")
     return 0
 
 
@@ -92,6 +114,7 @@ def verify(out: pathlib.Path) -> int:
             "tests differ": meta["tests_differ"] and visible != original,
             "visible hash": sha256_bytes(visible) == meta["visible_test_sha256"],
             "original hash": sha256_bytes(original) == meta["original_test_sha256"],
+            "tests parse": tests_parse(task),
         }
         fails, last = stub_fails(task)
         checks["stub fails visible"] = fails
