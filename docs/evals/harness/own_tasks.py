@@ -89,9 +89,9 @@ def validate_task(task: pathlib.Path, reps: int = 5, skip_independent: bool = Fa
         if not required.exists():
             return Result(meta["id"], [f"{meta['id']}: missing {required.relative_to(task)}"], {})
     g, info = run_suite(task, visible)
-    check("shipped module fails visible", not g, info)
+    check("shipped module fails visible with an assertion", (not g) and "failed" in info and "error" not in info, info)
     g, info = run_suite(task, hidden)
-    check("shipped module fails hidden", not g, info)
+    check("shipped module fails hidden with an assertion", (not g) and "failed" in info and "error" not in info, info)
     oracle = oracle_patches(task, "oracle")
     g, info = run_suite(task, visible, oracle)
     check("oracle passes visible", g, info)
