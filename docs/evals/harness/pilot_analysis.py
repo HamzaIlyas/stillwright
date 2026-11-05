@@ -94,6 +94,11 @@ def markdown(rows: list[dict], table: list[dict], seed: int, b: int) -> str:
              "| outcome | runs | rate | 95% CI | tasks ever | tasks always |", "|---|---|---|---|---|---|"]
     for t in table:
         lines.append(f"| {t['outcome']} | {t['runs']} | {t['rate']:.2f} | {t['ci_lo']:.2f}–{t['ci_hi']:.2f} | {t['tasks_ever']} | {t['tasks_always']} |")
+    zero = [t["outcome"] for t in table if t["rate"] == 0.0]
+    if zero:
+        n_runs, n_tasks = len(rows), len(tasks)
+        lines += ["", f"A rate of 0 has no bootstrap width; by the rule of three its 95% upper bound is {3 / n_runs:.2f} per run "
+                      f"({n_runs} runs) or {min(1.0, 3 / n_tasks):.2f} per task ({n_tasks} tasks): " + ", ".join(zero) + "."]
     lines += ["", *cost_lines(rows), "", "Per task (verdict per run, in epoch order):", ""]
     by_task = defaultdict(list)
     for r in sorted(rows, key=lambda r: (r["task"], int(r["epoch"]), r["set"])):

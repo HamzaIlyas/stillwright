@@ -92,7 +92,10 @@ def select(pool: pathlib.Path, out: pathlib.Path, seed: int, n: int) -> int:
         meta = json.loads((out / tid / "task.json").read_text())
         tasks.append({"id": tid, "folder_sha256": folder_sha256(out / tid),
                       "visible_test_sha256": meta["visible_test_sha256"], "original_test_sha256": meta["original_test_sha256"]})
-    split = json.loads((out / chosen[0] / "task.json").read_text())["split"]
+    splits = {json.loads((out / tid / "task.json").read_text())["split"] for tid in chosen}
+    if len(splits) != 1:
+        raise SystemExit(f"pool mixes splits: {sorted(splits)}")
+    split = splits.pop()
     manifest = {"seed": seed, "pool_dir": pool.name, "pool_size": len(ids), "pool_ids_sha256": sha256_bytes("\n".join(ids).encode()),
                 "split": split, "tasks": tasks, "dry_task": {"id": dry, "folder_sha256": folder_sha256(dry_dir / dry)},
                 "skipped_syntax_error": skipped, "skipped_no_markers": no_markers, "skipped_stub_not_failing": not_failing}

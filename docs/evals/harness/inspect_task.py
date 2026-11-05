@@ -91,14 +91,8 @@ def claude_code(arm: str):
         state.metadata["env_fingerprint_before"] = before.stdout.strip()
         res = await sandbox().exec(["bash", "-c", script], timeout=RUN_TIMEOUT)
         stream = await sandbox().read_file("stream.jsonl")
-        final = {}
-        for line in stream.splitlines():
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if d.get("type") == "result":
-                final = d
+        results = result_events(stream)
+        final = results[-1] if results else {}
         state.metadata["claude_exit"] = res.stdout.strip()
         state.metadata["stream_jsonl"] = stream  # the full transcript, kept for the published dataset
         try:
@@ -106,14 +100,31 @@ def claude_code(arm: str):
             state.metadata["sw_log"] = state.metadata["sw_log"].stdout
         except Exception as e:  # noqa: BLE001
             state.metadata["sw_log"] = f"unavailable: {e}"
-        state.metadata["receipt"] = {k: final.get(k) for k in ("total_cost_usd", "duration_ms", "num_turns", "is_error")}
-        state.metadata["receipt"]["subtype"] = final.get("subtype")
-        state.metadata["receipt"]["result_present"] = bool(final)
+        # A session can end more than once (a background job or task notification wakes it and it closes again):
+        # cost is cumulative in the last event, turns and duration are summed, and the final message is every
+        # closing text in order, so a flag written before the wake-up is not lost.
+        state.metadata["receipt"] = {"total_cost_usd": final.get("total_cost_usd"),
+                                     "duration_ms": sum(r.get("duration_ms") or 0 for r in results) or None,
+                                     "num_turns": sum(r.get("num_turns") or 0 for r in results) or None,
+                                     "is_error": any(bool(r.get("is_error")) for r in results),
+                                     "subtype": final.get("subtype"), "result_present": bool(results), "result_events": len(results)}
         state.metadata["modelUsage"] = final.get("modelUsage")
         state.metadata["arm"] = arm
-        state.output.completion = final.get("result") or ""
+        state.output.completion = "\n\n".join(r.get("result") or "" for r in results).strip()
         return state
     return solve
+
+
+def result_events(stream: str) -> list[dict]:
+    out = []
+    for line in stream.splitlines():
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if d.get("type") == "result":
+            out.append(d)
+    return out
 
 
 @scorer(metrics=[accuracy(), stderr()])
