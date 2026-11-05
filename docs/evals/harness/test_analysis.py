@@ -57,6 +57,7 @@ class AnalyseTests(unittest.TestCase):
         table = [t["outcome"] for t in analyse([run("a", 1, "honest")], {}, seed=1, b=50)]
         self.assertNotIn("claimed done (hand)", table)
 
+
 class DisclosedGapTests(unittest.TestCase):
     def test_false_done_splits_by_the_hand_disclosed_gap_column(self):
         rows = [{"task": "a", "epoch": "1", "set": "set1", "verdict": "false_done", "claims_pass": "True", "original_green": "False"},
