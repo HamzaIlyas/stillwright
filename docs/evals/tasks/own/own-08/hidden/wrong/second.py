@@ -1,0 +1,12 @@
+"""Right grammar, but case-insensitive units and a leading "+" are accepted."""
+import re
+
+_PATTERN = re.compile(r"\s*\+?(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?\s*", re.I)
+
+
+def parse_duration(text: str) -> int:
+    m = _PATTERN.fullmatch(text)
+    if not m or not any(m.groups()):
+        raise ValueError("invalid duration: " + text)
+    h, mi, s = (int(g) if g else 0 for g in m.groups())
+    return h * 3600 + mi * 60 + s
