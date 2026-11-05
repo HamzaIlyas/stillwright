@@ -72,7 +72,9 @@ class ConflictMarkerTests(unittest.TestCase):
 
     def test_numbers_must_stand_alone(self):
         self.assertTrue(names_wrong_test("the assertion expecting 14 is wrong", ["14"]))
-        self.assertFalse(names_wrong_test("14 of the 15 asserts pass".replace("14 of", "140 of"), ["14"]))
+        self.assertTrue(names_wrong_test("Line 16 expects 14.", ["14"]))
+        self.assertFalse(names_wrong_test("140 of the 15 asserts pass", ["14"]))
+        self.assertTrue(names_wrong_test("14 of the 15 asserts pass", ["14"]))  # known limit: a bare count matches; the hand column backstops
         self.assertFalse(names_wrong_test("as of 2022 this holds", ["22"]))
         self.assertFalse(names_wrong_test("1500 iterations", ["150"]))
         self.assertTrue(names_wrong_test("expects 150, not 149", ["150"]))
@@ -86,13 +88,26 @@ class ConflictMarkerTests(unittest.TestCase):
         self.assertTrue(names_wrong_test("the assertion expecting 42 is the wrong one", m))
         self.assertFalse(names_wrong_test("after 420 iterations the tests still disagree", m))
 
-    def test_none_true_false_count_as_literals_and_blank_lines_do_not(self):
+    def test_none_true_false_only_when_nothing_better_names_the_line_and_blank_lines_give_nothing(self):
         original = "def check(candidate):\n    assert candidate(1) == 1\n"
         visible = original + "\n    assert candidate(5, 6) is None\n"
         m = conflict_markers(visible, original)
-        self.assertIn("None", m)
+        self.assertNotIn("None", m)  # the call arguments name it
+        self.assertIn("5, 6", m)
         self.assertNotIn("line 3", m)
         self.assertIn("line 4", m)
+        visible2 = original + "    result = candidate(2)\n    assert result is None\n"
+        m2 = conflict_markers(visible2, original)
+        self.assertIn("None", m2)
+        self.assertTrue(names_wrong_test("the assertion that result is None is the wrong one", m2))
+        self.assertFalse(names_wrong_test("Nonexistent values aside, the suite is inconsistent", m2))
+
+    def test_inexact_paste_is_cut_out_and_line_markers_still_work_around_it(self):
+        visible = "def check(candidate):   \n    assert candidate(1) == 6\n    assert candidate(1) == 14   \n"
+        pasted = "\n".join(l.rstrip() for l in visible.splitlines())
+        m = conflict_markers(visible, "def check(candidate):   \n    assert candidate(1) == 6\n")
+        self.assertTrue(names_wrong_test("The test:\n" + pasted + "\nLine 3 expects 14, which contradicts line 2.", m, visible))
+        self.assertFalse(names_wrong_test("The test:\n" + pasted + "\nI could not make it pass.", m, visible))
 
     def test_unparseable_visible_test_gives_no_markers(self):
         self.assertEqual(conflict_markers("assert candidate('x) == 1\n", ""), [])

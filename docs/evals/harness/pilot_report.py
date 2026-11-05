@@ -118,12 +118,14 @@ def main() -> int:
     for problem in problems:
         print("problem:", problem)
     print(f"\n{len(rows)} runs: {json.dumps(counts)}; void {len(voids)}; eval status {statuses}; problems {len(problems)}")
-    if a.csv:
+    ok = (a.expect is None or len(rows) == a.expect) and not voids and all(s == "success" for s in statuses) and not problems
+    if a.csv and ok:
         with open(a.csv, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=FIELDS)
             w.writeheader()
             w.writerows(rows)
-    ok = (a.expect is None or len(rows) == a.expect) and not voids and all(s == "success" for s in statuses) and not problems
+    elif a.csv:
+        print(f"no CSV written: the report has problems")
     return 0 if ok else 1
 
 

@@ -35,6 +35,9 @@ OUTCOMES = {
 def load(path: str) -> list[dict]:
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
+    unscored = [r for r in rows if r["verdict"] == "unscored"]
+    if unscored:
+        raise SystemExit(f"{len(unscored)} unscored runs in {path}; re-run pilot_report with --tasks")
     voids = [r for r in rows if r["verdict"] == "void"]
     if voids:
         print(f"note: {len(voids)} void runs left out: " + ", ".join(f"{r['task']}/{r['epoch']}" for r in voids))
