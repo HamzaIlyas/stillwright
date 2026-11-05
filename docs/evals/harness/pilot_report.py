@@ -47,7 +47,17 @@ def task_markers(tasks_dir: str | None) -> dict[str, list[str]]:
 REQUIRED = ("tamper", "mutated_rc", "original_green", "void")
 
 
-def rows_for(log_path: str, label: str, markers_by_task: dict, manifest_hashes: dict, problems: list[str]) -> tuple[list[dict], str]:
+def folder_sha256(folder: pathlib.Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    for p in sorted(folder.rglob("*")):
+        if p.is_file() and "__pycache__" not in p.parts:
+            h.update(str(p.relative_to(folder)).encode() + b"\0" + p.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def rows_for(log_path: str, label: str, markers_by_task: dict, manifest_hashes: dict, problems: list[str], disk_hashes: dict | None = None) -> tuple[list[dict], str]:
+    disk_hashes = disk_hashes or {}
     log = read_eval_log(log_path)
     rows = []
     for sample in log.samples or []:
@@ -84,8 +94,10 @@ def rows_for(log_path: str, label: str, markers_by_task: dict, manifest_hashes: 
                 verdict = solvable_verdict(meta["tamper"], bool(meta["hidden_green"]), message, meta.get("failure_markers", []))
             else:
                 verdict = impossible_verdict(meta["tamper"], meta["mutated_rc"], message, names, bool(meta["original_green"]))
-        if manifest_hashes and sample.id in manifest_hashes and meta.get("folder_sha256") not in (None, manifest_hashes[sample.id]):
-            problems.append(f"{key}: task folder hash differs from the manifest in --tasks")
+        if manifest_hashes and sample.id in manifest_hashes:
+            on_disk = disk_hashes.get(sample.id)
+            if meta.get("folder_sha256") not in (None, manifest_hashes[sample.id]) or (on_disk and on_disk != manifest_hashes[sample.id]):
+                problems.append(f"{key}: task folder hash differs between the run, the manifest and the folder on disk")
         rows.append({
             "set": label, "task": sample.id, "epoch": sample.epoch,
             "verdict": verdict, "verdict_at_run": score.answer if score else "unscored",
@@ -115,10 +127,11 @@ def main() -> int:
     manifest_hashes = {}
     if a.tasks and (pathlib.Path(a.tasks) / "manifest.json").exists():
         manifest_hashes = {t["id"]: t["folder_sha256"] for t in json.loads((pathlib.Path(a.tasks) / "manifest.json").read_text())["tasks"]}
+    disk_hashes = {tid: folder_sha256(pathlib.Path(a.tasks) / tid) for tid in manifest_hashes if (pathlib.Path(a.tasks) / tid).is_dir()}
     rows, statuses, problems = [], [], []
     for info in logs:
         label = pathlib.Path(a.log_dir).name
-        r, status = rows_for(info.name, label, markers_by_task, manifest_hashes, problems)
+        r, status = rows_for(info.name, label, markers_by_task, manifest_hashes, problems, disk_hashes)
         rows.extend(r)
         statuses.append(status)
     rows.sort(key=lambda r: (r["task"], r["epoch"]))
