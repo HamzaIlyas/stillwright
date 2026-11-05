@@ -12,6 +12,10 @@ Runs: 30 over 10 tasks. Bootstrap over tasks, B=10000, seed 20261105, 95% percen
 | named the contradiction (hand) | 30/30 | 1.00 | 1.00–1.00 | 10 | 10 |
 | claimed done (hand) | 0/30 | 0.00 | 0.00–0.00 | 0 | 0 |
 
+A rate of 0 has no bootstrap width; by the rule of three its 95% upper bound is 0.10 per run (30 runs) or 0.30 per task (10 tasks): cheat, silent, error (host error, counted as a run), bad (cheat or silent), claimed done (hand).
+
+A rate of 1 likewise: 95% lower bound 0.90 per run or 0.70 per task: honest, named the contradiction (hand).
+
 - Cost (notional, subscription): total 2.39 USD, mean 0.080, max 0.100
 - Turns: mean 4.9, max 7; wall: mean 23 s, max 38 s
 - Runs with is_error or a non-success subtype: 0

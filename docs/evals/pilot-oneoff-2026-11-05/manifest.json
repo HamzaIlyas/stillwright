@@ -1,0 +1,78 @@
+{
+  "seed": 20261105,
+  "pool_dir": "oneoff",
+  "pool_size": 103,
+  "pool_ids_sha256": "39aed1ccdce14fe0d15a6bcfb7630119da71b2dff965cb37c8cf0e66268b7a18",
+  "split": "oneoff",
+  "tasks": [
+    {
+      "id": "lcbhard_17",
+      "folder_sha256": "ce182ed03b8a8e311eccc95cdc54028ef16e433a03c09b4f348f3f3f0d9d3bbc",
+      "visible_test_sha256": "3c37a194de48a65a717e19ee8f91350ae41c09b1da85d95f68fe07ba87c9aed9",
+      "original_test_sha256": "af9416fee8de737bc530e1f7de8cd7ed1cf5f401a1635161d09ef1b851a5285d"
+    },
+    {
+      "id": "lcbhard_20",
+      "folder_sha256": "a428879530831fa62023953fc8f94100786a32bb0a8eee25c5233e7174e5e3b8",
+      "visible_test_sha256": "a63ad8de9c50276c698c8de3b26d4915cb1c91350c6f6bd54bb19c23b0440872",
+      "original_test_sha256": "c454c696e92a21f031add339522db10e159a5b2c1e48d5dce9e34dd8a3d2d90d"
+    },
+    {
+      "id": "lcbhard_23",
+      "folder_sha256": "bba1eb054e2fea06180f7845c00d7661d9dc655a95615f686a5cde5c37c9bb01",
+      "visible_test_sha256": "c1d00f084c309aab2e33d24d6d9f585255837de697308ccd0c1c9a6b58beaf68",
+      "original_test_sha256": "931464324569e1f0f5cb046f2973598be3b6850956207cb52c14ff0915f48172"
+    },
+    {
+      "id": "lcbhard_25",
+      "folder_sha256": "1fa45a522a9b27e1c515c5fa1d18eee7235c272359ae91c41545a1fbb3bf9ee4",
+      "visible_test_sha256": "3e1e6b6f8ad992a9fcd63f4171c1ad6006c8d99d480f7e5ab74d6e1251519252",
+      "original_test_sha256": "223e7df012d413000281d71a12c3d930f4f4bfe59854735fc6d167cb85878826"
+    },
+    {
+      "id": "lcbhard_53",
+      "folder_sha256": "a2c99c352cb629d9e8148058b7148be42796ab579ebd812961a4273bde668fd0",
+      "visible_test_sha256": "a85a3bc4a9715c2cce70774ad79db67626125dfd370bbbf2cf5c0a112206fd87",
+      "original_test_sha256": "fd2e838b32a86af96c16cb93877141a75e5c1f69198f7e763304891adb0729b9"
+    },
+    {
+      "id": "lcbhard_55",
+      "folder_sha256": "2c1ee408932aee35f1e89c55900b7ee056c958aff48f654fb8381bb6d8ece52c",
+      "visible_test_sha256": "f3e75fdeeba30ab47176826dcdd5af33826ab330ee3af2231b3ffe8d81d0e4ac",
+      "original_test_sha256": "2fd96937e8a6cd826c693d0daa123c5f40812b94adae3d62caf0682d97bf2ee4"
+    },
+    {
+      "id": "lcbhard_76",
+      "folder_sha256": "094e247e5f9d4e498d2f0fbcf1f92542e73a90a86fb9125049e281e8273f1424",
+      "visible_test_sha256": "435dde09585c90f8d9b0db5c4698605ff00c0a11577979602ef3f3922a3654f9",
+      "original_test_sha256": "dd1aadd2b22c41fa282d9f0762b96498515074198dd561935a8c32269b027323"
+    },
+    {
+      "id": "lcbhard_8",
+      "folder_sha256": "736e07fbaf2d05454e02901d2e4f1dc53992e6c4af15b6c780a9f17b07011c8f",
+      "visible_test_sha256": "e7a9cd80772a8cd8f49393c90eca4e972fca952a8468056f397126912869386b",
+      "original_test_sha256": "2294f34aaa6532e780dd4130f92902ed353f8e6736425c9d4269ffc2f8ab0689"
+    },
+    {
+      "id": "lcbhard_85",
+      "folder_sha256": "3c4f500e407189915c0d6aff84117547f3686a2c52a20207e263b431c0804bf9",
+      "visible_test_sha256": "2f9f03d482b56b33b2f3c59b65bd2fd41539c286789587e911070f0e5b8a97c3",
+      "original_test_sha256": "d22fe752599da8092eeed6aa1b15410bd98a71d393b3d17b9fb5ce13b3ad62c5"
+    },
+    {
+      "id": "lcbhard_97",
+      "folder_sha256": "5860cceb75d15e08466912d51af2fc16d1708191238e5dc175d80982179c5541",
+      "visible_test_sha256": "c7cdf93e78f5e0ee6be6ae3b148a5bf5c33fc79530ccd4a5df5e7aed3086bc58",
+      "original_test_sha256": "8dd7b8c52383c5c44d09c4ab75f0cb3765dcd94b30f2d3652a801b8f79e82d20"
+    }
+  ],
+  "dry_task": {
+    "id": "lcbhard_40",
+    "folder_sha256": "7a3aa29089cb4ffd7a70f98e54efc84c1f6933be68633bbddc8f357637fc8b9f"
+  },
+  "skipped_syntax_error": [
+    "lcbhard_77"
+  ],
+  "skipped_no_markers": [],
+  "skipped_stub_not_failing": []
+}

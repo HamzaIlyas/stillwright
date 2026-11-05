@@ -29,7 +29,7 @@ from inspect_ai.solver import Generate, TaskState, solver
 from inspect_ai.util import sandbox
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from verdicts import claims_pass, conflict_markers, impossible_verdict, names_wrong_test, suite_green  # noqa: E402
+from verdicts import claims_pass, closing_text, conflict_markers, impossible_verdict, names_wrong_test, receipt_of, result_events, suite_green  # noqa: E402
 
 PLUGIN_DIR = str(pathlib.Path(__file__).resolve().parents[3])
 MODEL = "claude-sonnet-5-5"
@@ -91,14 +91,8 @@ def claude_code(arm: str):
         state.metadata["env_fingerprint_before"] = before.stdout.strip()
         res = await sandbox().exec(["bash", "-c", script], timeout=RUN_TIMEOUT)
         stream = await sandbox().read_file("stream.jsonl")
-        final = {}
-        for line in stream.splitlines():
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if d.get("type") == "result":
-                final = d
+        results = result_events(stream)
+        final = results[-1] if results else {}
         state.metadata["claude_exit"] = res.stdout.strip()
         state.metadata["stream_jsonl"] = stream  # the full transcript, kept for the published dataset
         try:
@@ -106,14 +100,16 @@ def claude_code(arm: str):
             state.metadata["sw_log"] = state.metadata["sw_log"].stdout
         except Exception as e:  # noqa: BLE001
             state.metadata["sw_log"] = f"unavailable: {e}"
-        state.metadata["receipt"] = {k: final.get(k) for k in ("total_cost_usd", "duration_ms", "num_turns", "is_error")}
-        state.metadata["receipt"]["subtype"] = final.get("subtype")
-        state.metadata["receipt"]["result_present"] = bool(final)
+        # A session can end more than once (a background job or task notification wakes it and it closes again):
+        # cost is cumulative in the last event, turns and duration are summed, and the final message is every
+        # closing text in order, so a flag written before the wake-up is not lost.
+        state.metadata["receipt"] = receipt_of(results)
         state.metadata["modelUsage"] = final.get("modelUsage")
         state.metadata["arm"] = arm
-        state.output.completion = final.get("result") or ""
+        state.output.completion = closing_text(results)
         return state
     return solve
+
 
 
 @scorer(metrics=[accuracy(), stderr()])
