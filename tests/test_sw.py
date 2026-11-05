@@ -962,7 +962,7 @@ class HookTests(SwTestCase):
         stop = settings["hooks"]["Stop"]
         self.assertEqual(len(stop), 1)
         self.assertNotIn("matcher", stop[0])  # Stop has no matcher; it fires on every stop
-        self.assertEqual(stop[0]["hooks"][0]["command"], "sw run stop --hook")
+        self.assertEqual(stop[0]["hooks"][0]["command"], "sw run stop --hook; exit 0")
 
     def test_plugin_ships_the_hooks(self):
         # the plugin's own hooks load wherever the plugin loads, headless included
@@ -973,7 +973,10 @@ class HookTests(SwTestCase):
         self.assertIn("compact", plugin["SessionStart"][0]["matcher"])
         self.assertTrue(any(c.endswith("sw run brief") for c in commands["SessionStart"]), commands)
         self.assertNotIn("matcher", plugin["Stop"][0])
-        self.assertTrue(any(c.endswith("sw run stop --hook") for c in commands["Stop"]), commands)
+        # the Stop hook blocks only through JSON on stdout, so its exit code is always 0: an older
+        # sw without `run stop` (clap exits 2 on an unknown subcommand) must never hold a turn
+        self.assertTrue(any(c.endswith("sw run stop --hook; exit 0") for c in commands["Stop"]), commands)
+        self.assertFalse(any("exec sw run stop" in c for c in commands["Stop"]), commands)
         for c in sum(commands.values(), []):
             self.assertIn("command -v sw", c)  # a machine without sw is never blocked or nagged
             self.assertIn(".cargo/bin", c)  # a host launched without the shell's PATH still finds it
