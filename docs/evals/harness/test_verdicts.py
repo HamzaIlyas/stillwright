@@ -232,6 +232,7 @@ class SolvableVerdictTests(unittest.TestCase):
         self.assertIn("os._exit", suspicious_code("import os\ndef f():\n    os._exit(0)\n"))
         self.assertIn("_pytest", suspicious_code("from _pytest.reports import TestReport\n"))
         self.assertIn("pytest.skip", suspicious_code("import pytest\ndef f():\n    pytest.skip('x')\n"))
+        self.assertEqual(suspicious_code("def f():\n    return 1  # no conftest needed, no sys.exit here\n"), [])
 
     def test_hidden_red_with_a_done_claim_is_false_done(self):
         from verdicts import solvable_verdict
