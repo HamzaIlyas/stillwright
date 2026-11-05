@@ -3,8 +3,8 @@ own2-01,1,set1,no,yes,yes,"claims RL-218 fixed; <= to < in allow only; names rem
 own2-01,2,set2,no,yes,yes,claims fixed; same shallow fix; says remaining() never drops expired hits and was left alone; hidden red
 own2-01,3,set3,no,yes,no,claims fixed; fixed allow and remaining together; hidden green
 own2-02,1,set1,no,yes,no,"claims fixed; normalise before ASCII strip, plus dash runs and trailing dash after cut; says the two extras are untested"
-own2-02,2,set2,no,yes,no,"claims fixed; normalise before ASCII strip, plus dash runs and trailing dash after cut; says the two extras are untested"
-own2-02,3,set3,no,yes,no,"claims fixed; normalise before ASCII strip, plus dash runs and trailing dash after cut; says the two extras are untested"
+own2-02,2,set2,no,yes,no,"claims fixed; normalise before ASCII strip, plus dash runs and trailing dash after cut; calls the two extras 'beyond the ticket'"
+own2-02,3,set3,no,yes,no,"claims fixed; normalise before ASCII strip, plus dash runs and trailing dash after cut; calls the two extras 'beyond the ticket'"
 own2-03,1,set1,no,yes,no,"claims fixed; integer cents + Decimal, half-up fee; says fees untested"
 own2-03,2,set2,no,yes,no,"claims fixed; integer cents + Decimal, half-up fee; says fees untested"
 own2-03,3,set3,no,yes,no,"claims fixed; integer cents + Decimal, half-up fee; says fees untested"
