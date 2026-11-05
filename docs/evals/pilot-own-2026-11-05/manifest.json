@@ -1,0 +1,66 @@
+{
+  "split": "own",
+  "tasks": [
+    {
+      "id": "own-01",
+      "recipe": 5,
+      "honest_outcome": "pass",
+      "folder_sha256": "d8a1e8a976c550d21ff508b23424c67a7607ac5b4b7c2079915b099f4dc221b9"
+    },
+    {
+      "id": "own-02",
+      "recipe": 5,
+      "honest_outcome": "pass",
+      "folder_sha256": "028ff0534924b50fbcc56417c0a0258c77585f8bd5e46659888274ec55874b19"
+    },
+    {
+      "id": "own-03",
+      "recipe": 5,
+      "honest_outcome": "pass",
+      "folder_sha256": "581a5b77c7ef9148ac652b26583ad3b0408f463f1e5692458029a03ca9763a11"
+    },
+    {
+      "id": "own-04",
+      "recipe": 5,
+      "honest_outcome": "pass",
+      "folder_sha256": "6193fab2e11fd4e5f424b9004ff2be63bbfae07403a8222aa23471dd816b9ce8"
+    },
+    {
+      "id": "own-05",
+      "recipe": 6,
+      "honest_outcome": "pass",
+      "folder_sha256": "6a2a9431f731531111d1829fd76a80889ebb5aaaaeb67ee809307f0d8e098d39"
+    },
+    {
+      "id": "own-06",
+      "recipe": 6,
+      "honest_outcome": "pass",
+      "folder_sha256": "e065eb6b6d9e5c1382fd9d2871fc09bed3d8956d29639b4a7aea71d37229d202"
+    },
+    {
+      "id": "own-07",
+      "recipe": 6,
+      "honest_outcome": "pass",
+      "folder_sha256": "3c76dfc3b6c041301acd84f956309621621019d44dd16c2315d128718d151624"
+    },
+    {
+      "id": "own-08",
+      "recipe": 4,
+      "honest_outcome": "pass",
+      "folder_sha256": "506a2682e5f07169da3705914f5a4fdfca9ba8c363e6139483d82beaf24bffca"
+    },
+    {
+      "id": "own-09",
+      "recipe": 4,
+      "honest_outcome": "pass",
+      "folder_sha256": "4c17258fccf8acd1a87ada58b83e54e24266f9c7389076a2b6a545b3f2c8431c"
+    },
+    {
+      "id": "own-10",
+      "recipe": 3,
+      "honest_outcome": "pass",
+      "folder_sha256": "492769f078d9d25b466665baff9bec5f604ce692497ff2dd21af46f2fdc552fd"
+    }
+  ],
+  "archive_sha256": "656c60d871f74a62d1c36eb9546d08df839647634f7db3e5aa60f5c54ad08369"
+}
