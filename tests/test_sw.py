@@ -959,6 +959,200 @@ class HookTests(SwTestCase):
         self.assertEqual(len(start), 1)
         self.assertIn("compact", start[0]["matcher"])
         self.assertEqual(start[0]["hooks"][0]["command"], "sw run brief")
+        stop = settings["hooks"]["Stop"]
+        self.assertEqual(len(stop), 1)
+        self.assertNotIn("matcher", stop[0])  # Stop has no matcher; it fires on every stop
+        self.assertEqual(stop[0]["hooks"][0]["command"], "sw run stop --hook")
+
+    def test_plugin_ships_the_hooks(self):
+        # the plugin's own hooks load wherever the plugin loads, headless included
+        plugin = json.loads((pathlib.Path(__file__).resolve().parents[1] / "hooks" / "hooks.json").read_text())["hooks"]
+        commands = {event: [h["command"] for entry in plugin[event] for h in entry["hooks"]] for event in plugin}
+        self.assertEqual(plugin["PreToolUse"][0]["matcher"], "Bash")
+        self.assertTrue(any(c.endswith("sw gate --hook") for c in commands["PreToolUse"]), commands)
+        self.assertIn("compact", plugin["SessionStart"][0]["matcher"])
+        self.assertTrue(any(c.endswith("sw run brief") for c in commands["SessionStart"]), commands)
+        self.assertNotIn("matcher", plugin["Stop"][0])
+        self.assertTrue(any(c.endswith("sw run stop --hook") for c in commands["Stop"]), commands)
+        for c in sum(commands.values(), []):
+            self.assertIn("command -v sw", c)  # a machine without sw is never blocked or nagged
+            self.assertIn(".cargo/bin", c)  # a host launched without the shell's PATH still finds it
+
+
+class StopHookTests(SwTestCase):
+    """`sw run stop --hook`: a turn may not end while the open run here has a `$` step without a certified receipt."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        self.work.mkdir()
+        git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run([*git, "init", "-q"], cwd=self.work, check=True)
+        (self.work / "a.txt").write_text("a\n")
+        subprocess.run([*git, "add", "-A"], cwd=self.work, check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "init"], cwd=self.work, check=True)
+
+    def stop(self, message="Done, all fixed.", active=False, cwd=None, raw=None, event_cwd=None):
+        cwd = cwd or self.work
+        event = raw if raw is not None else json.dumps({"session_id": "s", "transcript_path": "/x", "cwd": str(event_cwd or cwd),
+                                                        "hook_event_name": "Stop", "stop_hook_active": active,
+                                                        "last_assistant_message": message})
+        result = subprocess.run([SW, "run", "stop", "--hook"], env=self.env, input=event, capture_output=True, text=True, encoding="utf-8", cwd=cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout, result.stderr
+
+    def open_run(self, check="$ true", cwd=None, plan=None, name="Thing"):
+        run = pathlib.Path(self.sw("run", "new", name, cwd=cwd or self.work).strip())
+        (run / "plan.md").write_text(plan or f"# Goal: x\n1. make it | check: {check}\n")
+        return run
+
+    def blocked(self, **kw):
+        out, _ = self.stop(**kw)
+        self.assertTrue(out, "expected a block")
+        decision = json.loads(out)
+        self.assertEqual(decision["decision"], "block")
+        return decision["reason"]
+
+    def test_no_open_run_here_allows_the_stop(self):
+        out, _ = self.stop()
+        self.assertEqual(out, "")
+
+    def test_unproven_command_step_blocks_once_and_names_what_to_run(self):
+        run = self.open_run()
+        out, _ = self.stop()
+        decision = json.loads(out)
+        self.assertEqual(decision["decision"], "block")
+        self.assertIn("step 1", decision["reason"])
+        self.assertIn("make it", decision["reason"])
+        self.assertIn(f"sw run check {run.name} 1", decision["reason"])
+        self.assertIn("sw run done", decision["reason"])
+        self.assertIn("result=fail", decision["reason"])
+        # the host is already continuing because of this hook: never block twice
+        out, _ = self.stop(active=True)
+        self.assertEqual(out, "")
+
+    def test_certified_step_allows_the_stop(self):
+        run = self.open_run()
+        self.sw("run", "check", run.name, "1", cwd=self.work)
+        self.sw("run", "done", run.name, "1", cwd=self.work)
+        out, _ = self.stop()
+        self.assertEqual(out, "")
+
+    def test_failing_receipt_still_blocks(self):
+        run = self.open_run("$ false")
+        subprocess.run([SW, "run", "check", run.name, "1"], env=self.env, capture_output=True, text=True, cwd=self.work)
+        out, _ = self.stop()
+        self.assertEqual(json.loads(out)["decision"], "block")
+        self.assertIn("fail", json.loads(out)["reason"])
+
+    def test_a_card_waiting_on_the_user_allows_the_stop(self):
+        run = self.open_run()
+        self.sw("inbox", "add", "ask", "which colour?", "--run", run.name)
+        out, _ = self.stop()
+        self.assertEqual(out, "")
+
+    def test_prose_steps_do_not_block(self):
+        self.open_run("five lines")
+        out, _ = self.stop()
+        self.assertEqual(out, "")
+
+    def test_a_run_from_another_folder_does_not_block(self):
+        self.open_run()
+        other = pathlib.Path(self.tmp.name) / "other"
+        other.mkdir()
+        out, _ = self.stop(cwd=other)
+        self.assertEqual(out, "")
+
+    def test_malformed_input_fails_open_with_a_warning(self):
+        self.open_run()
+        for bad in ("", "null", "{", "\ufeff{}"):
+            out, err = self.stop(raw=bad)
+            self.assertEqual(out, "", bad)
+            self.assertIn("warning", err, bad)
+
+    def test_a_second_run_cannot_shadow_the_first(self):
+        real = self.open_run()
+        self.open_run(check="looks fine", name="Decoy")
+        self.assertIn(real.name, self.blocked())
+        parent = pathlib.Path(self.tmp.name)
+        self.open_run(check="looks fine", cwd=parent, name="Decoy above")
+        self.assertIn(real.name, self.blocked())
+
+    def test_editing_the_plan_is_noticed_once_and_recorded(self):
+        run = self.open_run()
+        self.blocked()
+        (run / "plan.md").write_text("# Goal: x\n1. make it | check: looks right\n")
+        reason = self.blocked()
+        self.assertIn("plan.md changed", reason)
+        self.assertIn("sw run log", reason)
+        plan_events = [json.loads(l) for l in (run / "log.jsonl").read_text().splitlines() if '"plan"' in l]
+        self.assertEqual(len(plan_events), 2)
+        self.assertTrue(plan_events[-1].get("changed"))
+        out, _ = self.stop()  # the edit is on record and the plan is prose only
+        self.assertEqual(out, "")
+
+    def test_a_held_outward_step_is_not_demanded(self):
+        self.open_run(plan="# Goal: x\nOutward: push\n1. push it | check: $ true | outward: push\n")
+        out, _ = self.stop()
+        self.assertEqual(out, "")
+
+    def test_only_steps_that_can_start_are_demanded(self):
+        self.open_run(plan="# Goal: x\n1. a | check: $ true | after: 2\n2. b | check: $ true\n")
+        reason = self.blocked()
+        self.assertIn("step 2", reason)
+        self.assertNotIn("step 1", reason)
+
+    def test_a_session_above_the_run_folder_is_not_held(self):
+        self.open_run()
+        out, _ = self.stop(cwd=pathlib.Path(self.tmp.name))
+        self.assertEqual(out, "")
+        sub = self.work / "sub"
+        sub.mkdir()
+        self.blocked(cwd=sub)
+
+    def test_a_run_with_no_start_folder_never_matches(self):
+        run = self.open_run()
+        log = run / "log.jsonl"
+        log.write_text(log.read_text().replace(json.dumps(str(self.work)), '""'))
+        other = pathlib.Path(self.tmp.name) / "other"
+        other.mkdir()
+        out, _ = self.stop(cwd=other)
+        self.assertEqual(out, "")
+
+    def test_a_logged_failure_is_an_honest_stop(self):
+        run = self.open_run()
+        self.sw("run", "log", run.name, "step=1", "result=fail", "note=could not")
+        out, _ = self.stop()
+        self.assertEqual(out, "")
+
+    def test_only_a_card_for_this_run_waiting_on_the_user_counts(self):
+        run = self.open_run()
+        self.sw("inbox", "add", "notify", "fyi", "--run", run.name)
+        self.blocked()
+        self.sw("inbox", "add", "ask", "q?", "--run", "some-other-run")
+        self.blocked()
+        self.sw("inbox", "add", "review", "ok to push?", "--run", run.name)
+        out, _ = self.stop()
+        self.assertEqual(out, "")
+
+    def test_a_passing_receipt_still_needs_done(self):
+        run = self.open_run()
+        self.sw("run", "check", run.name, "1", cwd=self.work)
+        self.assertIn("not certified", self.blocked())
+
+    def test_the_event_folder_wins_over_the_process_folder(self):
+        self.open_run()
+        other = pathlib.Path(self.tmp.name) / "other"
+        other.mkdir()
+        self.blocked(cwd=other, event_cwd=self.work)
+        out, _ = self.stop(cwd=self.work, event_cwd=other)
+        self.assertEqual(out, "")
+
+    def test_plain_mode_prints_the_verdict(self):
+        run = self.open_run()
+        out = self.sw("run", "stop", cwd=self.work)
+        self.assertIn("block", out)
+        self.assertIn(run.name, out)
 
 
 class BriefTests(SwTestCase):

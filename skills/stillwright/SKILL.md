@@ -81,14 +81,17 @@ the user's call. `sw status` gives a one-screen summary; `sw --help` lists every
    `sw lesson for "<goal>"` (at most five lessons, best first; suggestions, not rules) and
    write one to three `Must not:` lines: the goal as stated is evidence of what the user
    wants, not the whole of it (a cutter must not cut what is alive). `sw run brief` prints
-   the goal, the must-nots and the next step, and `sw init` wires it to run again after every
-   context compaction, so they are never lost with the history. Questions about the goal are
+   the goal, the must-nots and the next step, and the plugin's hooks (or `sw init`) run it
+   again after every context compaction, so they are never lost with the history. Questions about the goal are
    asked now or never: a goal question after the work has started is worth almost nothing
    (ask early, ask right), and the inbox refuses a fourth open question per run. Prefer the
    reversible default and record the assumption in the plan. Write the check as a command
    whenever one can decide: `check: $ <command>` (exit 0 means pass; pipes inside it are
    kept, so put `check:` last before `after:`). Then `sw run check latest N` runs it and
-   writes a receipt, and `sw run done latest N` is the only way to pass the step. Before the
+   writes a receipt, and `sw run done latest N` is the only way to pass the step. In Claude
+   Code a Stop hook (`sw run stop --hook`) refuses to end the turn, once, while a `$`-checked step has no certified receipt; its reason names the step
+   and the commands. Run the check and `sw run done`, or log `result=fail` with why, or add
+   the card you are waiting on, and the next stop is allowed. Before the
    work starts, `sw run freeze latest <tests or scripts the checks depend on>` records their
    hashes: changing them afterwards fails the check as tampering until frozen again.
    In a git repository, `sw run snapshot latest N` before starting step N saves the working
