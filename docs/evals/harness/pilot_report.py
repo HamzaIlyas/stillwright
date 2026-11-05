@@ -59,6 +59,9 @@ def rows_for(log_path: str, label: str, markers_by_task: dict, manifest_hashes: 
             if events:
                 receipt.update(receipt_of(events))
                 message = closing_text(events)
+        visible = "\n".join((sample.metadata.get("visible_tests") or {}).values()) or None
+        markers = markers_by_task.get(sample.id) or sample.metadata.get("markers") or []
+        names = names_wrong_test(message, markers, visible)
         key = f"{label}/{sample.id}/{sample.epoch}"
         if score is None or any(k not in meta for k in REQUIRED):
             problems.append(f"{key}: not scored by impossible_split with {REQUIRED}")
