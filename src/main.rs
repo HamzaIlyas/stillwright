@@ -295,6 +295,17 @@ enum RunCmd {
         run: String,
         step: String,
     },
+    /// Claude Code's Stop hook: the turn may not end, once, while the open run here has a
+    /// `$`-checked step without a certified receipt (no receipt, a failing one, or one not yet
+    /// passed by `sw run done`). `--hook` reads the Stop event on stdin and answers with
+    /// `{"decision":"block","reason":…}`; without it, prints the verdict. Allows the stop when
+    /// the host is already continuing because of this hook, when an ask or review card for the
+    /// run is open (waiting on the user is a reason to stop), when a step was logged as failed,
+    /// when no run is open here, and when the event is not JSON (fail open).
+    Stop {
+        #[arg(long)]
+        hook: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1811,6 +1822,115 @@ fn run_cwd(run: &Path) -> Option<String> {
         .and_then(|e| e.get("cwd").map(value_str))
 }
 
+/// The step's title: the words between `N.` and the first `|`.
+fn plan_step_title(plan: &str, step: &str) -> String {
+    plan.lines()
+        .find_map(|line| {
+            let digits: String = line.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let rest = &line[digits.len()..];
+            (digits == step && rest.starts_with('.'))
+                .then(|| rest[1..].split('|').next().unwrap_or("").trim().to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// Why this turn may not end yet, or `None` when it may.
+fn stop_verdict(store: &Store, here: &Path, host_continuing: bool) -> Result<Option<String>> {
+    if host_continuing {
+        // The host is already continuing because of this hook: one nudge is the rule, so a
+        // step that stays unproven can never trap the session.
+        return Ok(None);
+    }
+    let Some(dir) = open_run_here(store, here)? else {
+        return Ok(None);
+    };
+    let name = file_name(&dir);
+    let cards: Vec<Card> = store.load("inbox.json")?;
+    let waiting = cards
+        .iter()
+        .any(|c| c.status == "open" && c.run == name && matches!(c.kind, Kind::Ask | Kind::Review));
+    if waiting {
+        return Ok(None);
+    }
+    let plan = fs::read_to_string(dir.join("plan.md")).unwrap_or_default();
+    let progress = Progress::of(&dir);
+    let events = log_events(&dir)?;
+    for step in &progress.steps {
+        if progress.results.get(step).map(String::as_str) == Some("pass") {
+            continue;
+        }
+        let Some(check) = plan_step_check(&plan, step) else {
+            continue;
+        };
+        if command_check(&check).is_none() {
+            continue;
+        }
+        // The last word on the step: a receipt from `sw run check`, or a hand-logged result.
+        let last = events.iter().rev().find(|e| {
+            event_is(e, "step", step)
+                && (event_is(e, "event", "receipt") || e.contains_key("result"))
+        });
+        let state = match last {
+            None => "has no receipt",
+            Some(e) if event_is(e, "event", "receipt") => {
+                if e.get("ok") == Some(&serde_json::Value::Bool(true)) {
+                    "has a receipt that `sw run done` has not certified"
+                } else {
+                    "has a failing receipt"
+                }
+            }
+            // Logged as not done: an honest stop, nothing to force.
+            Some(e) if e.get("result").map(value_str).as_deref() == Some("fail") => continue,
+            Some(_) => "has a pass logged by hand, which does not count for a `$` check",
+        };
+        let title = plan_step_title(&plan, step);
+        return Ok(Some(format!(
+            "stillwright: run {name} step {step} ({title}) {state}, so this turn cannot end as done. \
+             Run `sw run check {name} {step}` and then `sw run done {name} {step}`. \
+             If the step is not done, say so: `sw run log {name} step={step} result=fail note=<why>`. \
+             If you are waiting on the user, add a card (`sw inbox add ask \"<question>\" --run {name}`), then stop again."
+        )));
+    }
+    Ok(None)
+}
+
+fn run_stop(store: &Store, hook: bool) -> Result<()> {
+    let mut here = std::env::current_dir().map_err(|e| e.to_string())?;
+    let mut host_continuing = false;
+    if hook {
+        use std::io::Read as _;
+        let mut input = String::new();
+        std::io::stdin()
+            .read_to_string(&mut input)
+            .map_err(|e| e.to_string())?;
+        let input = input.trim_start_matches('\u{feff}');
+        let event: serde_json::Value = serde_json::from_str(input).unwrap_or_default();
+        if event.get("hook_event_name").and_then(|v| v.as_str()) != Some("Stop") {
+            // Fail open: a Stop hook that errors would hold every turn, and a broken event is
+            // the host's bug; say so where the log can see it.
+            eprintln!("warning: sw run stop --hook: no Stop event on stdin; allowed");
+            return Ok(());
+        }
+        host_continuing = event
+            .get("stop_hook_active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if let Some(cwd) = event.get("cwd").and_then(|v| v.as_str()) {
+            here = PathBuf::from(cwd);
+        }
+    }
+    match (hook, stop_verdict(store, &here, host_continuing)?) {
+        (true, Some(reason)) => println!(
+            "{}",
+            serde_json::json!({ "decision": "block", "reason": reason })
+        ),
+        (true, None) => {}
+        (false, Some(reason)) => println!("block: {reason}"),
+        (false, None) => println!("allow"),
+    }
+    Ok(())
+}
+
 fn run_brief(store: &Store) -> Result<()> {
     // The newest open run started in this folder (or a parent or child of it): a run from
     // another project must not leak into this session's context.
@@ -2207,6 +2327,7 @@ fn enable_in_settings(path: &Path) -> Result<bool> {
         for (event, matcher, command) in [
             ("PreToolUse", "Bash", "sw gate --hook"),
             ("SessionStart", "startup|resume|compact", "sw run brief"),
+            ("Stop", "", "sw run stop --hook"),
         ] {
             let list = hooks.entry(event).or_insert_with(|| serde_json::json!([]));
             let Some(list) = list.as_array_mut() else {
@@ -2222,10 +2343,14 @@ fn enable_in_settings(path: &Path) -> Result<bool> {
                     })
             });
             if !present {
-                list.push(serde_json::json!({
-                    "matcher": matcher,
-                    "hooks": [{ "type": "command", "command": command, "timeout": 20 }]
-                }));
+                let hook =
+                    serde_json::json!([{ "type": "command", "command": command, "timeout": 20 }]);
+                // Stop takes no matcher: it fires on every stop.
+                list.push(if matcher.is_empty() {
+                    serde_json::json!({ "hooks": hook })
+                } else {
+                    serde_json::json!({ "matcher": matcher, "hooks": hook })
+                });
             }
         }
     }
@@ -2940,6 +3065,7 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
         RunCmd::Snapshot { run, step } => run_snapshot(&store.resolve_run(&run)?, &step)?,
         RunCmd::Rewind { run, step } => run_rewind(&store.resolve_run(&run)?, &step)?,
         RunCmd::Brief => run_brief(store)?,
+        RunCmd::Stop { hook } => run_stop(store, hook)?,
         RunCmd::Stats => run_stats(store)?,
         RunCmd::Next { run } => {
             let dir = store.resolve_run(&run)?;

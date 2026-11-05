@@ -959,6 +959,114 @@ class HookTests(SwTestCase):
         self.assertEqual(len(start), 1)
         self.assertIn("compact", start[0]["matcher"])
         self.assertEqual(start[0]["hooks"][0]["command"], "sw run brief")
+        stop = settings["hooks"]["Stop"]
+        self.assertEqual(len(stop), 1)
+        self.assertNotIn("matcher", stop[0])  # Stop has no matcher; it fires on every stop
+        self.assertEqual(stop[0]["hooks"][0]["command"], "sw run stop --hook")
+
+    def test_plugin_ships_the_hooks(self):
+        # the plugin's own hooks load wherever the plugin loads, headless included
+        plugin = json.loads((pathlib.Path(__file__).resolve().parents[1] / "hooks" / "hooks.json").read_text())["hooks"]
+        commands = {event: [h["command"] for entry in plugin[event] for h in entry["hooks"]] for event in plugin}
+        self.assertEqual(plugin["PreToolUse"][0]["matcher"], "Bash")
+        self.assertTrue(any(c.endswith("sw gate --hook") for c in commands["PreToolUse"]), commands)
+        self.assertIn("compact", plugin["SessionStart"][0]["matcher"])
+        self.assertTrue(any(c.endswith("sw run brief") for c in commands["SessionStart"]), commands)
+        self.assertNotIn("matcher", plugin["Stop"][0])
+        self.assertTrue(any(c.endswith("sw run stop --hook") for c in commands["Stop"]), commands)
+        for c in sum(commands.values(), []):
+            self.assertIn("command -v sw", c)  # a machine without sw is never blocked or nagged
+
+
+class StopHookTests(SwTestCase):
+    """`sw run stop --hook`: a turn may not end while the open run here has a `$` step without a certified receipt."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        self.work.mkdir()
+        git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run([*git, "init", "-q"], cwd=self.work, check=True)
+        (self.work / "a.txt").write_text("a\n")
+        subprocess.run([*git, "add", "-A"], cwd=self.work, check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "init"], cwd=self.work, check=True)
+
+    def stop(self, message="Done, all fixed.", active=False, cwd=None, raw=None):
+        cwd = cwd or self.work
+        event = raw if raw is not None else json.dumps({"session_id": "s", "transcript_path": "/x", "cwd": str(cwd),
+                                                        "hook_event_name": "Stop", "stop_hook_active": active,
+                                                        "last_assistant_message": message})
+        result = subprocess.run([SW, "run", "stop", "--hook"], env=self.env, input=event, capture_output=True, text=True, encoding="utf-8", cwd=cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout, result.stderr
+
+    def open_run(self, check="$ true"):
+        run = pathlib.Path(self.sw("run", "new", "Thing", cwd=self.work).strip())
+        (run / "plan.md").write_text(f"# Goal: x\n1. make it | check: {check}\n")
+        return run
+
+    def test_no_open_run_here_allows_the_stop(self):
+        out, _ = self.stop()
+        self.assertEqual(out, "")
+
+    def test_unproven_command_step_blocks_once_and_names_what_to_run(self):
+        run = self.open_run()
+        out, _ = self.stop()
+        decision = json.loads(out)
+        self.assertEqual(decision["decision"], "block")
+        self.assertIn("step 1", decision["reason"])
+        self.assertIn("make it", decision["reason"])
+        self.assertIn(f"sw run check {run.name} 1", decision["reason"])
+        self.assertIn("sw run done", decision["reason"])
+        self.assertIn("result=fail", decision["reason"])
+        # the host is already continuing because of this hook: never block twice
+        out, _ = self.stop(active=True)
+        self.assertEqual(out, "")
+
+    def test_certified_step_allows_the_stop(self):
+        run = self.open_run()
+        self.sw("run", "check", run.name, "1", cwd=self.work)
+        self.sw("run", "done", run.name, "1", cwd=self.work)
+        out, _ = self.stop()
+        self.assertEqual(out, "")
+
+    def test_failing_receipt_still_blocks(self):
+        run = self.open_run("$ false")
+        subprocess.run([SW, "run", "check", run.name, "1"], env=self.env, capture_output=True, text=True, cwd=self.work)
+        out, _ = self.stop()
+        self.assertEqual(json.loads(out)["decision"], "block")
+        self.assertIn("fail", json.loads(out)["reason"])
+
+    def test_a_card_waiting_on_the_user_allows_the_stop(self):
+        run = self.open_run()
+        self.sw("inbox", "add", "ask", "which colour?", "--run", run.name)
+        out, _ = self.stop()
+        self.assertEqual(out, "")
+
+    def test_prose_steps_do_not_block(self):
+        self.open_run("five lines")
+        out, _ = self.stop()
+        self.assertEqual(out, "")
+
+    def test_a_run_from_another_folder_does_not_block(self):
+        self.open_run()
+        other = pathlib.Path(self.tmp.name) / "other"
+        other.mkdir()
+        out, _ = self.stop(cwd=other)
+        self.assertEqual(out, "")
+
+    def test_malformed_input_fails_open_with_a_warning(self):
+        self.open_run()
+        for bad in ("", "null", "{", "\ufeff{}"):
+            out, err = self.stop(raw=bad)
+            self.assertEqual(out, "", bad)
+            self.assertIn("warning", err, bad)
+
+    def test_plain_mode_prints_the_verdict(self):
+        run = self.open_run()
+        out = self.sw("run", "stop", cwd=self.work)
+        self.assertIn("block", out)
+        self.assertIn(run.name, out)
 
 
 class BriefTests(SwTestCase):
