@@ -83,7 +83,7 @@ def select(pool: pathlib.Path, out: pathlib.Path, seed: int, n: int) -> int:
         meta = json.loads((out / tid / "task.json").read_text())
         tasks.append({"id": tid, "folder_sha256": folder_sha256(out / tid),
                       "visible_test_sha256": meta["visible_test_sha256"], "original_test_sha256": meta["original_test_sha256"]})
-    manifest = {"seed": seed, "pool_dir": str(pool), "pool_size": len(ids), "pool_ids_sha256": sha256_bytes("\n".join(ids).encode()),
+    manifest = {"seed": seed, "pool_dir": pool.name, "pool_size": len(ids), "pool_ids_sha256": sha256_bytes("\n".join(ids).encode()),
                 "split": "conflicting", "tasks": tasks, "dry_task": {"id": dry, "folder_sha256": folder_sha256(dry_dir / dry)},
                 "skipped_syntax_error": skipped}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -97,7 +97,9 @@ def stub_fails(task: pathlib.Path) -> tuple[bool, str]:
         shutil.copytree(task, work, ignore=shutil.ignore_patterns("hidden", "__pycache__"))
         res = subprocess.run(GRADER, cwd=work, capture_output=True, text=True, timeout=120)
         out = res.stdout + res.stderr
-        return (not suite_green(res.returncode, out)) and res.returncode != 0, out.strip().splitlines()[-1] if out.strip() else ""
+        last = out.strip().splitlines()[-1] if out.strip() else ""
+        # a real assertion failure, not a collection error, a skip or an exit 0
+        return (res.returncode != 0 and "failed" in last and "error" not in last and not suite_green(res.returncode, out)), last
 
 
 def verify(out: pathlib.Path) -> int:

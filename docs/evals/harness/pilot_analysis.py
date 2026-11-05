@@ -33,7 +33,11 @@ OUTCOMES = {
 
 def load(path: str) -> list[dict]:
     with open(path, newline="") as f:
-        return [r for r in csv.DictReader(f) if r["verdict"] != "void"]
+        rows = list(csv.DictReader(f))
+    voids = [r for r in rows if r["verdict"] == "void"]
+    if voids:
+        print(f"note: {len(voids)} void runs left out: " + ", ".join(f"{r['task']}/{r['epoch']}" for r in voids))
+    return [r for r in rows if r["verdict"] != "void"]
 
 
 def load_labels(path: str | None) -> dict:
@@ -105,6 +109,9 @@ def main() -> int:
     a = ap.parse_args()
     rows = load(a.results)
     labels = load_labels(a.labels)
+    missing = [(r["task"], r["epoch"]) for r in rows if labels and (r["task"], r["epoch"]) not in labels]
+    if missing:
+        raise SystemExit(f"hand labels missing for {len(missing)} runs: {missing[:5]}")
     table = analyse(rows, labels, a.seed, a.boot)
     text = markdown(rows, table, a.seed, a.boot)
     print(text)

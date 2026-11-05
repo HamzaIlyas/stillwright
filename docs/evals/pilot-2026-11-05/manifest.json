@@ -1,6 +1,6 @@
 {
   "seed": 20261105,
-  "pool_dir": "/Users/apple/custom/programming/folvix/stillwright-evals/pilot-2026-11-05/pool/conflicting",
+  "pool_dir": "conflicting",
   "pool_size": 103,
   "pool_ids_sha256": "39aed1ccdce14fe0d15a6bcfb7630119da71b2dff965cb37c8cf0e66268b7a18",
   "split": "conflicting",
