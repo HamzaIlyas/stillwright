@@ -25,7 +25,7 @@ import sys
 from inspect_ai.log import list_eval_logs, read_eval_log
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from verdicts import claims_pass, conflict_markers, impossible_verdict, names_wrong_test  # noqa: E402
+from verdicts import claims_pass, closing_text, conflict_markers, impossible_verdict, names_wrong_test, receipt_of, result_events  # noqa: E402
 
 FIELDS = ["set", "task", "epoch", "verdict", "verdict_at_run", "tamper", "mutated_rc", "mutated_green", "original_green",
           "flagged", "names_wrong_test", "claims_pass", "turns", "cost_usd", "duration_s", "results", "is_error", "subtype", "void", "env_fingerprint"]
@@ -54,25 +54,11 @@ def rows_for(log_path: str, label: str, markers_by_task: dict, manifest_hashes: 
         receipt = dict(meta.get("receipt") or sample.metadata.get("receipt") or {})
         message = sample.output.completion or ""
         stream = sample.metadata.get("stream_jsonl") or ""
-        if stream:  # rebuild turns, duration and the full closing text from every result event in the transcript
-            events = []
-            for line in stream.splitlines():
-                if '"result"' not in line:
-                    continue
-                try:
-                    d = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if d.get("type") == "result":
-                    events.append(d)
+        if stream:  # the same receipt arithmetic as the solver, so old and new logs are read under one rule
+            events = result_events(stream)
             if events:
-                receipt["num_turns"] = sum(e.get("num_turns") or 0 for e in events)
-                receipt["duration_ms"] = sum(e.get("duration_ms") or 0 for e in events)
-                receipt["result_events"] = len(events)
-                message = "\n\n".join(e.get("result") or "" for e in events).strip()
-        visible = "\n".join((sample.metadata.get("visible_tests") or {}).values()) or None
-        markers = markers_by_task.get(sample.id) or sample.metadata.get("markers") or []
-        names = names_wrong_test(message, markers, visible)
+                receipt.update(receipt_of(events))
+                message = closing_text(events)
         key = f"{label}/{sample.id}/{sample.epoch}"
         if score is None or any(k not in meta for k in REQUIRED):
             problems.append(f"{key}: not scored by impossible_split with {REQUIRED}")

@@ -94,11 +94,14 @@ def markdown(rows: list[dict], table: list[dict], seed: int, b: int) -> str:
              "| outcome | runs | rate | 95% CI | tasks ever | tasks always |", "|---|---|---|---|---|---|"]
     for t in table:
         lines.append(f"| {t['outcome']} | {t['runs']} | {t['rate']:.2f} | {t['ci_lo']:.2f}–{t['ci_hi']:.2f} | {t['tasks_ever']} | {t['tasks_always']} |")
+    n_runs, n_tasks = len(rows), len(tasks)
     zero = [t["outcome"] for t in table if t["rate"] == 0.0]
+    one = [t["outcome"] for t in table if t["rate"] == 1.0]
     if zero:
-        n_runs, n_tasks = len(rows), len(tasks)
         lines += ["", f"A rate of 0 has no bootstrap width; by the rule of three its 95% upper bound is {3 / n_runs:.2f} per run "
                       f"({n_runs} runs) or {min(1.0, 3 / n_tasks):.2f} per task ({n_tasks} tasks): " + ", ".join(zero) + "."]
+    if one:
+        lines += ["", f"A rate of 1 likewise: 95% lower bound {1 - 3 / n_runs:.2f} per run or {max(0.0, 1 - 3 / n_tasks):.2f} per task: " + ", ".join(one) + "."]
     lines += ["", *cost_lines(rows), "", "Per task (verdict per run, in epoch order):", ""]
     by_task = defaultdict(list)
     for r in sorted(rows, key=lambda r: (r["task"], int(r["epoch"]), r["set"])):

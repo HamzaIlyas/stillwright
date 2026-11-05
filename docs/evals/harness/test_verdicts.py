@@ -161,3 +161,37 @@ class RepeatedLineTests(unittest.TestCase):
         m = conflict_markers(visible, original)
         self.assertIn("line 3", m)
         self.assertIn("1029", m)
+
+
+class ResultEventTests(unittest.TestCase):
+    STREAM = (
+        '{"type":"system","subtype":"init"}\n'
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"result text inside a turn"}]}}\n'
+        '{"type":"result","subtype":"success","num_turns":8,"duration_ms":175729,"total_cost_usd":0.1294,"is_error":false,"result":"flag_for_human_intervention: line 14 is wrong"}\n'
+        'not json\n'
+        '{"type":"result","subtype":"success","num_turns":1,"duration_ms":4145,"total_cost_usd":0.1413,"is_error":false,"result":"The background job failed; nothing changes."}\n'
+    )
+
+    def test_two_closes_are_summed_and_joined(self):
+        from verdicts import closing_text, receipt_of, result_events
+        events = result_events(self.STREAM)
+        self.assertEqual(len(events), 2)
+        r = receipt_of(events)
+        self.assertEqual((r["num_turns"], r["duration_ms"], r["total_cost_usd"], r["result_events"]), (9, 179874, 0.1413, 2))
+        self.assertFalse(r["is_error"])
+        self.assertEqual(r["closes"], [(8, 175729, 0.1294), (1, 4145, 0.1413)])
+        self.assertTrue(closing_text(events).startswith("flag_for_human_intervention"))
+        self.assertIn("nothing changes", closing_text(events))
+
+    def test_no_close_gives_an_empty_receipt(self):
+        from verdicts import closing_text, receipt_of, result_events
+        r = receipt_of(result_events('{"type":"system"}\n'))
+        self.assertFalse(r["result_present"])
+        self.assertIsNone(r["num_turns"])
+        self.assertEqual(closing_text([]), "")
+
+    def test_an_errored_close_marks_the_session(self):
+        from verdicts import receipt_of
+        r = receipt_of([{"type": "result", "is_error": True, "num_turns": 2}, {"type": "result", "is_error": False, "num_turns": 1, "subtype": "success"}])
+        self.assertTrue(r["is_error"])
+        self.assertEqual(r["subtype"], "success")

@@ -29,7 +29,7 @@ from inspect_ai.solver import Generate, TaskState, solver
 from inspect_ai.util import sandbox
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from verdicts import claims_pass, conflict_markers, impossible_verdict, names_wrong_test, suite_green  # noqa: E402
+from verdicts import claims_pass, closing_text, conflict_markers, impossible_verdict, names_wrong_test, receipt_of, result_events, suite_green  # noqa: E402
 
 PLUGIN_DIR = str(pathlib.Path(__file__).resolve().parents[3])
 MODEL = "claude-sonnet-5-5"
@@ -103,28 +103,13 @@ def claude_code(arm: str):
         # A session can end more than once (a background job or task notification wakes it and it closes again):
         # cost is cumulative in the last event, turns and duration are summed, and the final message is every
         # closing text in order, so a flag written before the wake-up is not lost.
-        state.metadata["receipt"] = {"total_cost_usd": final.get("total_cost_usd"),
-                                     "duration_ms": sum(r.get("duration_ms") or 0 for r in results) or None,
-                                     "num_turns": sum(r.get("num_turns") or 0 for r in results) or None,
-                                     "is_error": any(bool(r.get("is_error")) for r in results),
-                                     "subtype": final.get("subtype"), "result_present": bool(results), "result_events": len(results)}
+        state.metadata["receipt"] = receipt_of(results)
         state.metadata["modelUsage"] = final.get("modelUsage")
         state.metadata["arm"] = arm
-        state.output.completion = "\n\n".join(r.get("result") or "" for r in results).strip()
+        state.output.completion = closing_text(results)
         return state
     return solve
 
-
-def result_events(stream: str) -> list[dict]:
-    out = []
-    for line in stream.splitlines():
-        try:
-            d = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if d.get("type") == "result":
-            out.append(d)
-    return out
 
 
 @scorer(metrics=[accuracy(), stderr()])
