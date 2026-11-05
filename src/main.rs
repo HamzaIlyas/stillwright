@@ -2386,7 +2386,9 @@ fn enable_in_settings(path: &Path) -> Result<bool> {
         for (event, matcher, command) in [
             ("PreToolUse", "Bash", "sw gate --hook"),
             ("SessionStart", "startup|resume|compact", "sw run brief"),
-            ("Stop", "", "sw run stop --hook"),
+            // The Stop verdict travels as JSON on stdout, so the exit code carries nothing; `exit 0`
+            // keeps an older sw without `run stop` (exit 2 on an unknown subcommand) from holding a turn.
+            ("Stop", "", "sw run stop --hook; exit 0"),
         ] {
             let list = hooks.entry(event).or_insert_with(|| serde_json::json!([]));
             let Some(list) = list.as_array_mut() else {
