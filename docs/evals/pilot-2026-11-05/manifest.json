@@ -1,0 +1,76 @@
+{
+  "seed": 20261105,
+  "pool_dir": "/Users/apple/custom/programming/folvix/stillwright-evals/pilot-2026-11-05/pool/conflicting",
+  "pool_size": 103,
+  "pool_ids_sha256": "39aed1ccdce14fe0d15a6bcfb7630119da71b2dff965cb37c8cf0e66268b7a18",
+  "split": "conflicting",
+  "tasks": [
+    {
+      "id": "lcbhard_17",
+      "folder_sha256": "c5505439cff4b2b8caefe3a557b3ba38ce37c9f5e3557a73431d31880d942f76",
+      "visible_test_sha256": "671d4bcd7aa6cd38667ec06be2b56113ac47d32db58a4f0e55fbfed8a0b8c3a6",
+      "original_test_sha256": "af9416fee8de737bc530e1f7de8cd7ed1cf5f401a1635161d09ef1b851a5285d"
+    },
+    {
+      "id": "lcbhard_20",
+      "folder_sha256": "d6d336e3d837bb11a2f7dda4ad787789f80d58ae98798b796614dd4a861ad9e8",
+      "visible_test_sha256": "850e862632be8c1fca93cbcbc54294b6b992af38c12c8242ff88e555af0aec25",
+      "original_test_sha256": "c454c696e92a21f031add339522db10e159a5b2c1e48d5dce9e34dd8a3d2d90d"
+    },
+    {
+      "id": "lcbhard_23",
+      "folder_sha256": "f8cda8430a36388ab4780dc0d1170aabaaf0ed284a50502b6d481ae16965ef30",
+      "visible_test_sha256": "5209fd7bd57c8bb329215f7f7166695484b0992351547cc424417c4882efe256",
+      "original_test_sha256": "931464324569e1f0f5cb046f2973598be3b6850956207cb52c14ff0915f48172"
+    },
+    {
+      "id": "lcbhard_25",
+      "folder_sha256": "28fca307f121b55d3b125c4356128ec8d936d582ac6e996b4323c578e1d613cc",
+      "visible_test_sha256": "60f25ac849dc41e18977ec4a3290f838ff4c5315980f80d6b433e3eda7c11a21",
+      "original_test_sha256": "223e7df012d413000281d71a12c3d930f4f4bfe59854735fc6d167cb85878826"
+    },
+    {
+      "id": "lcbhard_53",
+      "folder_sha256": "0d7e87d6622fa300a241ffbeb00c4c1498e3b907530329c838d7bed91775852f",
+      "visible_test_sha256": "3f6082aa449a4c8499306a269d85d3c0751c4f9f93eb54ca636d8375c8df7ec5",
+      "original_test_sha256": "fd2e838b32a86af96c16cb93877141a75e5c1f69198f7e763304891adb0729b9"
+    },
+    {
+      "id": "lcbhard_55",
+      "folder_sha256": "5a1a0c0cc2f81da0a98e6a460ff67fe57a82e14e57efe826d66147edfa7e51e6",
+      "visible_test_sha256": "853918dda8132421da5ca4aaea358873434c54bcbf5024f6977e2ff60b909d5c",
+      "original_test_sha256": "2fd96937e8a6cd826c693d0daa123c5f40812b94adae3d62caf0682d97bf2ee4"
+    },
+    {
+      "id": "lcbhard_76",
+      "folder_sha256": "57dfc85887d3ac680ceb1cc73cf160152cf9cc000cf0e3ad71932e6b0ab3d9a5",
+      "visible_test_sha256": "f712b2ad8061f77409be2ce6498e3efb6645e5a8061c61a098b3e6e28d8d74e5",
+      "original_test_sha256": "dd1aadd2b22c41fa282d9f0762b96498515074198dd561935a8c32269b027323"
+    },
+    {
+      "id": "lcbhard_8",
+      "folder_sha256": "d38584e74f70fe068587ff40af1249ec2a010c810752f3503294bffb562b99d2",
+      "visible_test_sha256": "b07a9bf2515792a42591dc42ee9bfae69d4045b3e5982ad51a8f5c180756bdc4",
+      "original_test_sha256": "2294f34aaa6532e780dd4130f92902ed353f8e6736425c9d4269ffc2f8ab0689"
+    },
+    {
+      "id": "lcbhard_85",
+      "folder_sha256": "20d8ad19842010c5763f999715968d0637160f796c4efa1ffba50963acbebccc",
+      "visible_test_sha256": "d59f1725294662bfaf806bec827e634a540f3f1064eda2c28c03eb94a2b0920e",
+      "original_test_sha256": "d22fe752599da8092eeed6aa1b15410bd98a71d393b3d17b9fb5ce13b3ad62c5"
+    },
+    {
+      "id": "lcbhard_97",
+      "folder_sha256": "a009e7d7310d56959f1b3763c9b3a3f8162c27af4ae731d8f3963b3c330e2c66",
+      "visible_test_sha256": "8f8b4497fb559a2045144791e196768b3a8a5c13c90a4958dcb1d0e76c63d349",
+      "original_test_sha256": "8dd7b8c52383c5c44d09c4ab75f0cb3765dcd94b30f2d3652a801b8f79e82d20"
+    }
+  ],
+  "dry_task": {
+    "id": "lcbhard_40",
+    "folder_sha256": "f948b151c3d10a3c7535d48101fd6f530c335963283c4ac2766b7b762774f41d"
+  },
+  "skipped_syntax_error": [
+    "lcbhard_77"
+  ]
+}
