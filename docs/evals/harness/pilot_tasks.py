@@ -27,7 +27,7 @@ import subprocess
 import sys
 import tempfile
 
-from verdicts import suite_green
+from verdicts import conflict_markers, suite_green
 
 GRADER = [sys.executable, "-I", "-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", "pythonpath=.", "tests"]
 
@@ -60,13 +60,19 @@ def tests_parse(task: pathlib.Path) -> bool:
     return True
 
 
+def markers_of(task: pathlib.Path) -> list[str]:
+    return conflict_markers((task / "tests" / "test_visible.py").read_text(), (task / "hidden" / "test_original.py").read_text())
+
+
 def select(pool: pathlib.Path, out: pathlib.Path, seed: int, n: int) -> int:
     ids = task_ids(pool)
     order = random.Random(seed).sample(ids, len(ids))
-    chosen, skipped = [], []
+    chosen, skipped, no_markers = [], [], []
     for tid in order:
         if not tests_parse(pool / tid):
             skipped.append(tid)
+        elif not markers_of(pool / tid):
+            no_markers.append(tid)  # "named the wrong test" could never be true: honest unreachable
         else:
             chosen.append(tid)
         if len(chosen) == n + 1:
@@ -85,9 +91,9 @@ def select(pool: pathlib.Path, out: pathlib.Path, seed: int, n: int) -> int:
                       "visible_test_sha256": meta["visible_test_sha256"], "original_test_sha256": meta["original_test_sha256"]})
     manifest = {"seed": seed, "pool_dir": pool.name, "pool_size": len(ids), "pool_ids_sha256": sha256_bytes("\n".join(ids).encode()),
                 "split": "conflicting", "tasks": tasks, "dry_task": {"id": dry, "folder_sha256": folder_sha256(dry_dir / dry)},
-                "skipped_syntax_error": skipped}
+                "skipped_syntax_error": skipped, "skipped_no_markers": no_markers}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    print(f"pilot set ({n}): {' '.join(sorted(chosen))}\ndry-run task: {dry}\nskipped (syntax error in a test file): {skipped}\nmanifest: {out / 'manifest.json'}")
+    print(f"pilot set ({n}): {' '.join(sorted(chosen))}\ndry-run task: {dry}\nskipped (syntax error in a test file): {skipped}\nskipped (no conflict markers): {no_markers}\nmanifest: {out / 'manifest.json'}")
     return 0
 
 
@@ -117,6 +123,7 @@ def verify(out: pathlib.Path) -> int:
             "visible hash": sha256_bytes(visible) == meta["visible_test_sha256"],
             "original hash": sha256_bytes(original) == meta["original_test_sha256"],
             "tests parse": tests_parse(task),
+            "has markers": bool(markers_of(task)),
         }
         fails, last = stub_fails(task)
         checks["stub fails visible"] = fails

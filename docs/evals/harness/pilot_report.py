@@ -9,8 +9,10 @@ anything; `verdict_at_run` is what the scorer wrote at the time. With --tasks, t
 are rebuilt from the task folders (needed for logs older than the markers field).
 
 Exit 1 when the number of scored runs differs from --expect, when any run is void (no `result` event,
-or a rate-limit error), when an eval did not finish, or when the grader-environment fingerprints of the
-runs in the directory are not all identical (a run changed the environment the grader runs in).
+or a rate-limit error), when an eval did not finish, when a sample lacks the scorer's facts or conflict
+markers (then it is `unscored`, never guessed), when a task folder's hash differs from the manifest in
+--tasks, or when the runs of one eval do not share one grader-environment fingerprint. A run whose
+`result` event has `is_error` for another reason is `error` (counted per arm, decision section 7).
 """
 from __future__ import annotations
 
@@ -40,19 +42,37 @@ def task_markers(tasks_dir: str | None) -> dict[str, list[str]]:
     return out
 
 
-def rows_for(log_path: str, label: str, markers_by_task: dict) -> tuple[list[dict], str]:
+REQUIRED = ("tamper", "mutated_rc", "original_green", "void")
+
+
+def rows_for(log_path: str, label: str, markers_by_task: dict, manifest_hashes: dict, problems: list[str]) -> tuple[list[dict], str]:
     log = read_eval_log(log_path)
     rows = []
     for sample in log.samples or []:
-        score = (sample.scores or {}).get("impossible_split") or next(iter((sample.scores or {}).values()), None)
+        score = (sample.scores or {}).get("impossible_split")
         meta = (score.metadata if score else {}) or {}
         receipt = meta.get("receipt") or sample.metadata.get("receipt") or {}
         message = sample.output.completion or ""
+        visible = "\n".join((sample.metadata.get("visible_tests") or {}).values()) or None
         markers = markers_by_task.get(sample.id) or sample.metadata.get("markers") or []
-        names = names_wrong_test(message, markers)
-        void = bool(meta.get("void", False))
-        verdict = "void" if void else impossible_verdict(meta.get("tamper", []), meta.get("mutated_rc", 1), message, names,
-                                                          bool(meta.get("original_green"))) if score else "unscored"
+        names = names_wrong_test(message, markers, visible)
+        key = f"{label}/{sample.id}/{sample.epoch}"
+        if score is None or any(k not in meta for k in REQUIRED):
+            problems.append(f"{key}: not scored by impossible_split with {REQUIRED}")
+            verdict, void = "unscored", False
+        elif not markers:
+            problems.append(f"{key}: no conflict markers (pass --tasks, or the task has none)")
+            verdict, void = "unscored", False
+        else:
+            void = bool(meta["void"])
+            if void:
+                verdict = "void"
+            elif receipt.get("is_error"):
+                verdict = "error"
+            else:
+                verdict = impossible_verdict(meta["tamper"], meta["mutated_rc"], message, names, bool(meta["original_green"]))
+        if manifest_hashes and sample.id in manifest_hashes and meta.get("folder_sha256") not in (None, manifest_hashes[sample.id]):
+            problems.append(f"{key}: task folder hash differs from the manifest in --tasks")
         rows.append({
             "set": label, "task": sample.id, "epoch": sample.epoch,
             "verdict": verdict, "verdict_at_run": score.answer if score else "unscored",
@@ -63,6 +83,9 @@ def rows_for(log_path: str, label: str, markers_by_task: dict) -> tuple[list[dic
             "duration_s": round((receipt.get("duration_ms") or 0) / 1000, 1), "is_error": receipt.get("is_error"),
             "subtype": meta.get("subtype"), "void": void, "env_fingerprint": (meta.get("env_fingerprint") or "")[:12],
         })
+    fingerprints = {r["env_fingerprint"] for r in rows if r["env_fingerprint"]}
+    if len(fingerprints) > 1:
+        problems.append(f"{label}/{pathlib.Path(log_path).name}: {len(fingerprints)} different grader-environment fingerprints in one eval")
     return rows, log.status
 
 
@@ -75,10 +98,13 @@ def main() -> int:
     a = ap.parse_args()
     logs = list_eval_logs(a.log_dir)
     markers_by_task = task_markers(a.tasks)
-    rows, statuses = [], []
+    manifest_hashes = {}
+    if a.tasks and (pathlib.Path(a.tasks) / "manifest.json").exists():
+        manifest_hashes = {t["id"]: t["folder_sha256"] for t in json.loads((pathlib.Path(a.tasks) / "manifest.json").read_text())["tasks"]}
+    rows, statuses, problems = [], [], []
     for info in logs:
         label = pathlib.Path(a.log_dir).name
-        r, status = rows_for(info.name, label, markers_by_task)
+        r, status = rows_for(info.name, label, markers_by_task, manifest_hashes, problems)
         rows.extend(r)
         statuses.append(status)
     rows.sort(key=lambda r: (r["task"], r["epoch"]))
@@ -89,14 +115,15 @@ def main() -> int:
     for r in rows:
         counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
     voids = [r for r in rows if r["void"]]
-    fingerprints = {r["env_fingerprint"] for r in rows if r["env_fingerprint"]}
-    print(f"\n{len(rows)} runs: {json.dumps(counts)}; void {len(voids)}; eval status {statuses}; grader env fingerprints {len(fingerprints)}")
+    for problem in problems:
+        print("problem:", problem)
+    print(f"\n{len(rows)} runs: {json.dumps(counts)}; void {len(voids)}; eval status {statuses}; problems {len(problems)}")
     if a.csv:
         with open(a.csv, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=FIELDS)
             w.writeheader()
             w.writerows(rows)
-    ok = (a.expect is None or len(rows) == a.expect) and not voids and all(s == "success" for s in statuses) and len(fingerprints) <= 1
+    ok = (a.expect is None or len(rows) == a.expect) and not voids and all(s == "success" for s in statuses) and not problems
     return 0 if ok else 1
 
 
