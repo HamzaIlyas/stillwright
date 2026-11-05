@@ -61,6 +61,13 @@ refuses the stale receipt. The rewind keeps the state it replaced, so nothing is
   and the agent's final message is at most five lines.
 - **Goals, not prompts.** It keeps a goal queue, plans each goal into checkable steps, routes
   steps to the cheapest model that a command can verify, and measures the dollars.
+- **Hooks the plugin brings along.** In Claude Code the plugin ships three hooks: the gate
+  before every shell command (`sw gate`: ask or block before a destructive one), the brief
+  after every context compaction (`sw run brief`), and a Stop hook (`sw run stop`) that refuses
+  to end a turn, once, while the open run has a `$`-checked step with no certified receipt. The
+  model gets the step and the exact commands back instead of the user getting "done". A step
+  logged as failed, a card waiting on you, or the host already continuing because of the hook
+  lets the turn end; a machine without `sw` is never blocked.
 
 ## Measured
 
@@ -96,7 +103,9 @@ Or the agent's own way:
 | Hermes Agent | `git clone --depth 1 https://github.com/HamzaIlyas/stillwright /tmp/stillwright && mkdir -p ~/.hermes/skills/stillwright && cp -R /tmp/stillwright/skills/. ~/.hermes/skills/stillwright/` |
 
 For a whole team: run `sw init` in the repository and commit the two files it writes
-(`.claude/settings.json`, `.github/copilot/settings.json`).
+(`.claude/settings.json`, `.github/copilot/settings.json`). It writes the same three hooks
+the plugin ships, for hosts and setups that do not load plugin hooks; with the plugin
+installed, a hook written by `sw init` runs a second time, which is harmless.
 
 The skills need the `sw` binary (a single file, no runtime). Any of these installs it:
 
