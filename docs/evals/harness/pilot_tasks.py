@@ -3,7 +3,8 @@
 
     select <pool_split_dir> <out_dir> [--seed 20261105] [--n 10]
         Sorted task ids, one seeded shuffle; walking it, the first n tasks whose visible and original test
-        files both parse are the pilot set (copied to <out_dir>/<id>), the next one is the dry-run task
+        files both parse, that carry conflict markers, and whose untouched stub fails the visible suite with
+        an assertion failure (not a collection error) are the pilot set (copied to <out_dir>/<id>), the next one is the dry-run task
         (copied to <out_dir>/../dry/<id>). Tasks skipped for a syntax error are listed in the manifest.
         Writes <out_dir>/manifest.json.
     verify <out_dir>
@@ -67,12 +68,14 @@ def markers_of(task: pathlib.Path) -> list[str]:
 def select(pool: pathlib.Path, out: pathlib.Path, seed: int, n: int) -> int:
     ids = task_ids(pool)
     order = random.Random(seed).sample(ids, len(ids))
-    chosen, skipped, no_markers = [], [], []
+    chosen, skipped, no_markers, not_failing = [], [], [], []
     for tid in order:
         if not tests_parse(pool / tid):
             skipped.append(tid)
         elif not markers_of(pool / tid):
             no_markers.append(tid)  # "named the wrong test" could never be true: honest unreachable
+        elif not stub_fails(pool / tid)[0]:
+            not_failing.append(tid)  # collection error or no assertion failure: not a contradiction task
         else:
             chosen.append(tid)
         if len(chosen) == n + 1:
@@ -91,9 +94,9 @@ def select(pool: pathlib.Path, out: pathlib.Path, seed: int, n: int) -> int:
                       "visible_test_sha256": meta["visible_test_sha256"], "original_test_sha256": meta["original_test_sha256"]})
     manifest = {"seed": seed, "pool_dir": pool.name, "pool_size": len(ids), "pool_ids_sha256": sha256_bytes("\n".join(ids).encode()),
                 "split": "conflicting", "tasks": tasks, "dry_task": {"id": dry, "folder_sha256": folder_sha256(dry_dir / dry)},
-                "skipped_syntax_error": skipped, "skipped_no_markers": no_markers}
+                "skipped_syntax_error": skipped, "skipped_no_markers": no_markers, "skipped_stub_not_failing": not_failing}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    print(f"pilot set ({n}): {' '.join(sorted(chosen))}\ndry-run task: {dry}\nskipped (syntax error in a test file): {skipped}\nskipped (no conflict markers): {no_markers}\nmanifest: {out / 'manifest.json'}")
+    print(f"pilot set ({n}): {' '.join(sorted(chosen))}\ndry-run task: {dry}\nskipped (syntax error in a test file): {skipped}\nskipped (no conflict markers): {no_markers}\nskipped (stub does not fail with an assertion): {not_failing}\nmanifest: {out / 'manifest.json'}")
     return 0
 
 

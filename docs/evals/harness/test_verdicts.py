@@ -64,10 +64,35 @@ class ConflictMarkerTests(unittest.TestCase):
         self.assertTrue(names_wrong_test("see line14", ["line 14"]))
         self.assertFalse(names_wrong_test("line 140 is fine", ["line 14"]))
 
-    def test_pasting_the_whole_test_file_is_not_naming(self):
-        msg = "Here is the test file:\n" + self.VISIBLE + "\nIt fails."
-        self.assertFalse(names_wrong_test(msg, conflict_markers(self.VISIBLE, self.ORIGINAL), self.VISIBLE))
-        self.assertTrue(names_wrong_test("the == 14 assertion is wrong", conflict_markers(self.VISIBLE, self.ORIGINAL), self.VISIBLE))
+    def test_pasting_the_whole_test_file_is_not_naming_but_words_around_it_are(self):
+        m = conflict_markers(self.VISIBLE, self.ORIGINAL)
+        self.assertFalse(names_wrong_test("Here is the test file:\n" + self.VISIBLE + "\nIt fails.", m, self.VISIBLE))
+        self.assertTrue(names_wrong_test("flag_for_human_intervention\nThe test is:\n" + self.VISIBLE + "\nLine 4 contradicts line 2.", m, self.VISIBLE))
+        self.assertTrue(names_wrong_test("the == 14 assertion is wrong", m, self.VISIBLE))
+
+    def test_numbers_must_stand_alone(self):
+        self.assertTrue(names_wrong_test("the assertion expecting 14 is wrong", ["14"]))
+        self.assertFalse(names_wrong_test("14 of the 15 asserts pass".replace("14 of", "140 of"), ["14"]))
+        self.assertFalse(names_wrong_test("as of 2022 this holds", ["22"]))
+        self.assertFalse(names_wrong_test("1500 iterations", ["150"]))
+        self.assertTrue(names_wrong_test("expects 150, not 149", ["150"]))
+
+    def test_short_wrong_values_are_kept_and_matched_standalone(self):
+        original = "def check(candidate):\n    assert candidate(1) == 1\n"
+        visible = original + "    assert candidate(79223) == 42\n"
+        m = conflict_markers(visible, original)
+        self.assertIn("79223", m)
+        self.assertIn("42", m)
+        self.assertTrue(names_wrong_test("the assertion expecting 42 is the wrong one", m))
+        self.assertFalse(names_wrong_test("after 420 iterations the tests still disagree", m))
+
+    def test_none_true_false_count_as_literals_and_blank_lines_do_not(self):
+        original = "def check(candidate):\n    assert candidate(1) == 1\n"
+        visible = original + "\n    assert candidate(5, 6) is None\n"
+        m = conflict_markers(visible, original)
+        self.assertIn("None", m)
+        self.assertNotIn("line 3", m)
+        self.assertIn("line 4", m)
 
     def test_unparseable_visible_test_gives_no_markers(self):
         self.assertEqual(conflict_markers("assert candidate('x) == 1\n", ""), [])
