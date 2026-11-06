@@ -63,7 +63,7 @@ lists every command. No `sw` on PATH: ask once, then `scripts/get-sw.sh`; unatte
    passing suite is not the whole contract: the reviewer's question is what the file promises
    that the test did not exercise. Steps nothing executable can decide (prose, design) use the
    same packet and verdict, and the verdict is the pass.
-   In Claude Code the Stop hook refuses to end the turn, once, while a `$` step is unproven:
+   In Claude Code the Stop hook refuses to end the turn while a `$` step is unproven:
    prove it, log `result=fail` with why, or add the card you wait on.
 5. **Finish: one call.** `sw run finish latest "<what was done and the proof, 5 lines max>"`
    closes the goal and adds the notify card. Your final message is that text and nothing more.
