@@ -2019,9 +2019,17 @@ class ContractReviewTests(SwTestCase):
         self.sw("run", "check", "latest", "1", cwd=self.work)
         self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
 
-    def test_a_check_that_is_not_the_suite_needs_no_reviewer(self):
+    def test_any_command_check_needs_the_reviewer_once_code_changed(self):
+        # the agent writes the check, so its wording cannot decide whether the review happens
         (self.run / "plan.md").write_text("# Goal: g\nMust not: x\n1. fix | check: $ true\nOutward: none\n")
         self.fix()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+    def test_a_docs_only_change_needs_no_reviewer(self):
+        (self.work / "README.md").write_text("notes\n")
         self.sw("run", "check", "latest", "1", cwd=self.work)
         self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
 
@@ -2054,10 +2062,12 @@ class ContractReviewTests(SwTestCase):
             self.sw("run", "done", "latest", "1", cwd=self.work)
         self.assertIn("review", str(cm.exception))
 
-    def test_only_test_files_changed_needs_no_reviewer(self):
+    def test_an_unfrozen_test_file_change_needs_the_reviewer_too(self):
         (self.work / "tests" / "test_more.py").write_text("import unittest\nclass U(unittest.TestCase):\n    def test_ok(self):\n        pass\n")
         self.sw("run", "check", "latest", "1", cwd=self.work)
-        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("test_more.py", str(cm.exception))
 
     def test_inside_a_git_repository_the_same_rule_holds(self):
         git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
@@ -2302,3 +2312,148 @@ class SourceFileClassificationTests(SwTestCase):
             self.sw("run", "prove", "latest", "1", cwd=self.work)
         self.assertIn("mod.py", str(cm.exception))
         self.assertNotIn("stream.jsonl", str(cm.exception))
+
+
+
+class ReviewRoundTwoTests(SwTestCase):
+    """Holes the second adversarial review reproduced against the 0.3 binary."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        (self.work / "tests").mkdir(parents=True)
+        (self.work / "mod.py").write_text("X = 1\n")
+        (self.work / "tests" / "test_x.py").write_text("import unittest\nfrom mod import X\nclass T(unittest.TestCase):\n    def test_x(self):\n        self.assertEqual(X, 2)\n")
+        self.plan = self.work / "plan.txt"
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ python3 -m unittest discover -s tests\nOutward: none\n")
+
+    def open(self):
+        return pathlib.Path(self.sw("run", "new", "r2", "--plan", str(self.plan), cwd=self.work).strip())
+
+    def verdict_for(self, run, text="PASS: mod.py now 2 as the test documents\n"):
+        v = run / "checks" / "step-1-review.md"
+        v.parent.mkdir(exist_ok=True)
+        v.write_text(text)
+        return v
+
+    def test_a_file_the_host_writes_between_calls_does_not_stale_the_receipt(self):
+        run = self.open()
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.work / "stream.jsonl").write_text('{"turn":1}\n')
+        (self.work / "stderr.txt").write_text("")
+        v = self.verdict_for(run)
+        self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={v}", cwd=self.work)
+        (self.work / "stream.jsonl").write_text('{"turn":1}\n{"turn":2}\n')
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_a_verdict_logged_before_the_latest_receipt_is_stale(self):
+        run = self.open()
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        v = self.verdict_for(run)
+        self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={v}", cwd=self.work)
+        (self.work / "mod.py").write_text("X = 2  # changed after the verdict\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+    def test_outside_git_the_hash_covers_the_run_folder_from_a_subfolder(self):
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        self.open()
+        sub = self.work / "sub"
+        sub.mkdir()
+        self.sw("run", "check", "latest", "1", cwd=sub)
+        (self.work / "mod.py").write_text("X = 2  # edited above the subfolder\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=sub)
+        self.assertIn("stale receipt", str(cm.exception))
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "needs an unreadable folder")
+    def test_an_unreadable_subfolder_does_not_break_run_new(self):
+        locked = self.work / "data"
+        locked.mkdir()
+        (locked / "secret").write_text("x\n")
+        locked.chmod(0o000)
+        try:
+            run = self.open()
+            self.assertTrue(run.is_dir())
+            (self.work / "mod.py").write_text("X = 2\n")
+            with self.assertRaises(Failed) as cm:
+                self.sw("run", "prove", "latest", "1", cwd=self.work)
+            self.assertIn("review", str(cm.exception))
+        finally:
+            locked.chmod(0o755)
+
+    def test_a_missing_start_manifest_is_tamper_not_a_free_pass(self):
+        run = self.open()
+        (run / "files-start.json").unlink()
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("manifest", str(cm.exception))
+
+    def test_a_bad_plan_leaves_no_goal_behind(self):
+        bad = self.work / "bad.txt"
+        bad.write_text("# Goal: g\n- no steps\n")
+        with self.assertRaises(Failed):
+            self.sw("run", "new", "r2", "--goal", "Fix the thing", "--plan", str(bad), cwd=self.work)
+        self.assertNotIn("Fix the thing", self.sw("goal", "list"))
+        self.assertEqual(self.sw("run", "list").strip(), "")
+
+    def test_latest_prefers_the_run_opened_in_this_folder(self):
+        other = pathlib.Path(self.tmp.name) / "other"
+        other.mkdir()
+        here = self.open()
+        self.sw("run", "new", "elsewhere", "--goal", "Other project", cwd=other)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "finish", "latest", "done", cwd=self.work)
+        self.assertIn(here.name, str(cm.exception))
+        self.assertNotIn("(done)", self.sw("goal", "list", "--all"))
+
+    def test_finish_twice_is_refused(self):
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        self.sw("run", "new", "r2", "--goal", "G", "--plan", str(self.plan), cwd=self.work)
+        self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.sw("run", "finish", "latest", "done", cwd=self.work)
+        with self.assertRaises(Failed):
+            self.sw("run", "finish", "latest", "done again", cwd=self.work)
+        self.assertEqual(self.sw("inbox", "list").count("notify"), 1)
+
+    def test_resume_does_not_rewrite_the_baseline(self):
+        self.sw("run", "baseline", cwd=self.work)
+        (self.work / "mod.py").write_text("X = 2\n")
+        event = json.dumps({"session_id": "s1", "cwd": str(self.work), "hook_event_name": "SessionStart", "source": "resume"})
+        r = subprocess.run([SW, "run", "brief", "--hook"], input=event, env=self.env, capture_output=True, text=True, cwd=self.work)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.open()
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+    def test_a_later_step_compares_against_the_last_certified_state(self):
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ python3 -m unittest discover -s tests\n2. b | check: $ true | after: 1\nOutward: none\n")
+        run = self.open()
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        v = self.verdict_for(run)
+        self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={v}", cwd=self.work)
+        self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("certified", self.sw("run", "prove", "latest", "2", cwd=self.work))
+
+    def test_ci_config_under_a_dot_folder_counts_as_source(self):
+        (self.work / ".github" / "workflows").mkdir(parents=True)
+        self.open()
+        (self.work / ".github" / "workflows" / "ci.yml").write_text("on: push\n")
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("ci.yml", str(cm.exception))
+
+    def test_review_key_cannot_be_logged_by_hand(self):
+        self.open()
+        with self.assertRaises(Failed):
+            self.sw("run", "log", "latest", "step=1", "review=pass", cwd=self.work)

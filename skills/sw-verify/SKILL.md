@@ -31,10 +31,10 @@ A command that exits 0 is the cheapest and most honest verdict there is, and for
 is the whole verdict. Two cases need a model reviewer, always a fresh read-only subagent on the
 small model that sees the packet and nothing else, so it costs cents:
 
-- **A code step checked by the test suite.** When the run changed source files and the step's
-  check is `pytest`, `unittest`, `npm test`, `cargo test`, `go test` or the like, `sw run done`
-  and `sw run prove` refuse to certify until the reviewer's verdict is logged. A passing suite
-  proves the test, not the contract: the reviewer reads the changed files against what they
+- **A code step.** When code or test files changed since the run started (or since the last
+  certified step), `sw run done` and `sw run prove` refuse to certify until the reviewer's
+  verdict is logged, whatever the check command was. A passing check proves the test, not the
+  contract: the reviewer reads the changed files against what they
   document (docstrings, comments, README) and fails the step when a documented behaviour is
   left broken or unimplemented, or when the reported symptom's cause is still there. This is
   the case the 2026-11-06 measurement found: an agent fixes the ticket, passes the visible
@@ -68,8 +68,9 @@ asks the contract question; the reviewer answers it file by file.
 ## Result
 
 Log it: `sw run log latest step=N result=pass|fail evidence=<verdict file> note="<one line>"`,
-from the work folder (the verdict is bound to the files as they are at that moment). On a
-code step this records the review; `sw run prove` then certifies. On a prose step it is the pass.
+after the check whose receipt it certifies (a verdict logged before the latest check does not
+count). On a code step this records the review; `sw run done` then certifies. On a prose step it
+is the pass. The orchestrator saves the reviewer's reply verbatim; the reviewer itself is read-only.
 A pass on a step with no command check is refused without `evidence=`: a non-empty file
 (the verdict, a screenshot, the fetched page), stored with its hash, so the claim and what
 backed it can be opened together later. On fail, the note says exactly what broke so the

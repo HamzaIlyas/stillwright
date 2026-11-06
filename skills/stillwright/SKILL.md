@@ -47,19 +47,22 @@ lists every command. No `sw` on PATH: ask once, then `scripts/get-sw.sh`; unatte
    decide: the suite that exists, never `$ true`. Read `sw lesson for "<goal>"` first. Ask
    goal questions now or never; prefer the reversible default and note the assumption. Outward
    steps or a goal new to the user: add a `review` card and wait.
-3. **Work the step.** `sw run next` names what can start. Route by `who:` (`sw route <who>`;
+3. **Work the step.** `sw run next` names what can start; start them together, one writer per
+   file. Route by `who:` (`sw route <who>`;
    small by default, mid for judgement no command checks, top only after mid failed), through
    `sw-worker` with a self-contained brief. Dangerous commands go through the gate (`sw gate`).
-   Tools: installed first, `sw-scout`, then `sw-forge`.
+   Tools: installed first, `sw-scout`, then `sw-forge`. Research `sw-deep-search`; heavy
+   context `sw-context-diet`; launches `sw-launch`; no goal anywhere: `sw-radar`, then stop.
 4. **Prove it: one call.** `sw run prove latest N` runs the check, writes the receipt and
    certifies the step. It refuses, with the reason, when the check fails, when frozen files
    changed, when the tree changed since the check, and when a **code step needs its review**:
-   a step that changed source files and whose check is the test suite is certified only after a
-   fresh reviewer judged the change against what the touched files document. Then: `sw run
+   a step after which code or test files changed is certified only once a fresh reviewer judged
+   the change against what the touched files document, whatever the check command was. Then: `sw run
    review latest N` prints the packet (goal, must-nots, diff or changed files with their
    content, check output); give it, and nothing else, to a read-only reviewer on the small model
-   (`sw-verify`); it writes `checks/step-N-review.md`, PASS or FAIL first, every changed file named; log it with
-   `sw run log latest step=N result=pass|fail evidence=<that file>`; `sw run prove` again. A
+   (`sw-verify`); save its reply verbatim as `checks/step-N-review.md` (PASS or FAIL first, every
+   changed file named); log it with `sw run log latest step=N result=pass|fail evidence=<that file>`;
+   then `sw run done latest N`. A
    passing suite is not the whole contract: the reviewer's question is what the file promises
    that the test did not exercise. Steps nothing executable can decide (prose, design) use the
    same packet and verdict, and the verdict is the pass.

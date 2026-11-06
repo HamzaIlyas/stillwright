@@ -535,6 +535,18 @@ impl Store {
     fn resolve_run(&self, reference: &str) -> Result<PathBuf> {
         let runs = self.runs()?;
         if reference.is_empty() || reference == "latest" {
+            // The newest run opened in this folder or above it; a run from another project is
+            // `latest` only when none was opened here.
+            let here = std::env::current_dir()
+                .ok()
+                .and_then(|d| fs::canonicalize(d).ok());
+            if let Some(here) = here {
+                if let Some(local) = runs.iter().rev().find(|dir| {
+                    run_cwd(dir).is_some_and(|c| here.starts_with(PathBuf::from(c)))
+                }) {
+                    return Ok(local.clone());
+                }
+            }
             return runs
                 .last()
                 .cloned()
@@ -885,111 +897,177 @@ fn stage_tree(top: &str, store: &TempStore) -> Result<String> {
 }
 
 /// Hash of the working tree: git's tree hash inside a repository, an error when git fails
-/// there, and outside one a content hash of the working directory (`dir:<sha256>`), so a receipt
-/// binds the files even where there is no repository.
-fn worktree_hash() -> Result<String> {
+/// there, and outside one a content hash of `root` (`dir:<sha256>`, the folder the run was
+/// opened in), so a receipt binds the files even where there is no repository.
+fn worktree_hash_at(root: &Path) -> Result<String> {
     match git_top() {
         Some(top) => tree_of_worktree(&top, false),
-        None => {
-            let cwd = std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
-            Ok(format!("dir:{}", dir_hash(&cwd)?))
-        }
+        None => Ok(format!("dir:{}", dir_hash(root)?)),
     }
 }
 
-/// Folders left out of a working-directory hash: build output, dependency trees and caches
-/// change without the work changing. The state folder is left out too when it sits inside.
-const DIR_HASH_SKIP: &[&str] = &[
-    "node_modules", "target", ".venv", "venv", ".tox", ".pytest_cache", ".mypy_cache",
-    ".ruff_cache", ".cache", ".sw-home",
-];
+/// The folder a run binds: where it was opened, or the current directory for an older run.
+fn run_root(run: &Path) -> Result<PathBuf> {
+    match run_cwd(run) {
+        Some(c) => Ok(PathBuf::from(c)),
+        None => std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}")),
+    }
+}
 
-/// Every file under `root` as (relative path, path), sorted; symlinks by their target path,
-/// never followed; HASH_SKIP, DIR_HASH_SKIP and the state folder left out.
+/// The folder a receipt binds outside git: the run's folder when sw runs inside it (so a
+/// subfolder cannot narrow the hash), otherwise the folder the check runs in, which is where
+/// the work being certified lives.
+fn require_inside_run_root(run: &Path) -> Result<PathBuf> {
+    let root = run_root(run)?;
+    let here = std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
+    let here_c = fs::canonicalize(&here).unwrap_or_else(|_| here.clone());
+    let root_c = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+    if here_c.starts_with(&root_c) {
+        Ok(root)
+    } else {
+        Ok(here)
+    }
+}
+
+/// Folders hosts and tools write during any run: never hashed, never source.
+const HOST_DIRS: &[&str] = &[
+    ".git", ".claude", ".codex", ".gemini", ".cursor", ".idea", ".vscode", ".cache",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv", "node_modules",
+    "target", "__pycache__", ".DS_Store", "dist", "build", "htmlcov", "coverage",
+];
+/// Files that change without the work changing: logs, transcripts, temp and backup files.
+const NOISE_EXT: &[&str] = &[
+    ".log", ".jsonl", ".tmp", ".bak", ".swp", ".orig", ".pyc", ".pyo", ".class", ".o",
+];
+/// Over this size a file is bound by its length, not its content.
+const BIG_FILE: u64 = 8 * 1024 * 1024;
+
+fn is_noise_path(rel: &str) -> bool {
+    let lower = rel.to_lowercase();
+    if lower.split('/').any(|seg| HOST_DIRS.contains(&seg)) {
+        return true;
+    }
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    name == ".coverage"
+        || name == "stderr.txt"
+        || name == "stdout.txt"
+        || NOISE_EXT.iter().any(|e| lower.ends_with(e))
+}
+
+/// Every bound file under `root` as (relative path, path), sorted. Inside a git repository the
+/// list is git's (tracked and untracked, ignored files left out); outside it is a walk that skips
+/// HOST_DIRS and the state folder, reads what it can and passes over what it cannot.
 fn walk_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
-    let state = state_root().ok().and_then(|s| fs::canonicalize(s).ok());
     let mut files: Vec<(String, PathBuf)> = Vec::new();
-    fn walk(root: &Path, dir: &Path, state: Option<&Path>, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
-        for entry in fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))? {
-            let path = entry.map_err(|e| e.to_string())?.path();
+    let root_s = root.to_string_lossy().into_owned();
+    if git(Some(&root_s), &[], &["rev-parse", "--show-toplevel"]).is_some() {
+        if let Some(listing) = git(Some(&root_s), &[], &["ls-files", "-co", "--exclude-standard", "-z"]) {
+            for rel in listing.split('\0').filter(|r| !r.is_empty()) {
+                let path = root.join(rel);
+                if path.is_file() && !is_noise_path(rel) {
+                    files.push((rel.to_string(), path));
+                }
+            }
+            files.sort();
+            files.dedup();
+            return Ok(files);
+        }
+    }
+    let state = state_root().ok().and_then(|s| fs::canonicalize(s).ok());
+    fn walk(root: &Path, dir: &Path, state: Option<&Path>, out: &mut Vec<(String, PathBuf)>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
             let name = file_name(&path);
-            if HASH_SKIP.contains(&name.as_str()) || DIR_HASH_SKIP.contains(&name.as_str()) {
+            if HOST_DIRS.contains(&name.as_str()) {
                 continue;
             }
-            let meta = fs::symlink_metadata(&path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
             if meta.file_type().is_symlink() {
-                let target = fs::read_link(&path).map_err(|e| e.to_string())?;
-                out.push((rel_path(root, &path) + " -> " + &target.to_string_lossy(), PathBuf::new()));
-            } else if meta.is_dir() {
+                continue;
+            }
+            if meta.is_dir() {
                 if let Some(state) = state {
                     if fs::canonicalize(&path).ok().as_deref() == Some(state) {
                         continue;
                     }
                 }
-                walk(root, &path, state, out)?;
+                walk(root, &path, state, out);
             } else if meta.is_file() {
-                out.push((rel_path(root, &path), path));
+                let rel = rel_path(root, &path);
+                if !is_noise_path(&rel) {
+                    out.push((rel, path));
+                }
             }
         }
-        Ok(())
     }
-    walk(root, root, state.as_deref(), &mut files)?;
+    walk(root, root, state.as_deref(), &mut files);
     files.sort();
     Ok(files)
 }
 
-/// sha256 over every file under `root` (relative path, then content), in `walk_files` order.
+/// sha256 of a file's content, or of its length when it is large or unreadable.
+fn file_digest(path: &Path) -> String {
+    match fs::metadata(path) {
+        Ok(m) if m.len() > BIG_FILE => {
+            format!("{:x}", Sha256::digest(format!("size:{}", m.len()).as_bytes()))
+        }
+        _ => match fs::read(path) {
+            Ok(bytes) => format!("{:x}", Sha256::digest(&bytes)),
+            Err(_) => format!("{:x}", Sha256::digest(b"unreadable")),
+        },
+    }
+}
+
+/// sha256 over every bound file under `root`: length-prefixed path and digest.
 fn dir_hash(root: &Path) -> Result<String> {
     let mut digest = Sha256::new();
     for (rel, file) in walk_files(root)? {
-        let bytes = if file.as_os_str().is_empty() {
-            Vec::new()
-        } else {
-            fs::read(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?
-        };
+        let d = file_digest(&file);
+        digest.update(rel.len().to_le_bytes());
         digest.update(rel.as_bytes());
-        digest.update([0u8]);
-        digest.update(&bytes);
-        digest.update([0u8]);
+        digest.update(d.len().to_le_bytes());
+        digest.update(d.as_bytes());
     }
     Ok(format!("{:x}", digest.finalize()))
 }
 
-/// Relative path -> sha256 of its content, for every file under `root`.
+/// Relative path -> sha256 of its content, for every bound file under `root`.
 fn dir_manifest(root: &Path) -> Result<BTreeMap<String, String>> {
-    let mut out = BTreeMap::new();
-    for (rel, file) in walk_files(root)? {
-        let bytes = if file.as_os_str().is_empty() {
-            Vec::new()
-        } else {
-            fs::read(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?
-        };
-        out.insert(rel, format!("{:x}", Sha256::digest(&bytes)));
-    }
-    Ok(out)
+    Ok(walk_files(root)?
+        .into_iter()
+        .map(|(rel, file)| {
+            let d = file_digest(&file);
+            (rel, d)
+        })
+        .collect())
 }
 
-/// The manifest `sw run new` writes: what the working directory held when the run started, so
-/// a later step can tell which source files it changed. Skipped above MANIFEST_MAX files (a run
-/// opened in a home folder); then no contract review is required, and the packet says so.
+/// The manifests a run keeps: what the folder held when the run started (`files-start.json`, a
+/// session baseline when one is fresh) and after the last certified step (`files-certified.json`).
+/// A step's review covers what changed since the later of the two. Above MANIFEST_MAX files the
+/// manifest is not taken and every command step needs the review, since nothing can say what changed.
 const START_MANIFEST: &str = "files-start.json";
+const CERTIFIED_MANIFEST: &str = "files-certified.json";
 const MANIFEST_MAX: usize = 20_000;
 
-fn write_start_manifest(store: &Store, run: &Path, cwd: &Path) -> Result<()> {
-    if let Some((ts, files)) = fresh_baseline(store, cwd)? {
-        let text = serde_json::to_string(&files).map_err(|e| e.to_string())?;
-        fs::write(run.join(START_MANIFEST), text)
-            .map_err(|e| format!("cannot write the start manifest: {e}"))?;
-        append_event(run, &[("event".into(), "baseline".into()), ("ts_recorded".into(), ts)])?;
-        return Ok(());
+/// The start manifest for `cwd`: (status, files). Never fails: a huge folder gives none.
+fn start_manifest(store: &Store, cwd: &Path) -> (String, Option<BTreeMap<String, String>>) {
+    if let Ok(Some((ts, files))) = fresh_baseline(store, cwd) {
+        return (format!("baseline {ts}"), Some(files));
     }
-    let files = walk_files(cwd)?;
-    if files.len() > MANIFEST_MAX {
-        return Ok(());
+    match walk_files(cwd) {
+        Ok(files) if files.len() > MANIFEST_MAX => ("unavailable: too many files".into(), None),
+        Ok(_) => match dir_manifest(cwd) {
+            Ok(m) => ("ok".into(), Some(m)),
+            Err(why) => (format!("unavailable: {why}"), None),
+        },
+        Err(why) => (format!("unavailable: {why}"), None),
     }
-    let manifest = dir_manifest(cwd)?;
-    let text = serde_json::to_string(&manifest).map_err(|e| e.to_string())?;
-    fs::write(run.join(START_MANIFEST), text).map_err(|e| format!("cannot write the start manifest: {e}"))
 }
 
 /// Baselines live in the state folder, one per working directory, and count for BASELINE_HOURS:
@@ -1061,44 +1139,72 @@ fn hook_event_on_stdin() -> Option<serde_json::Value> {
     serde_json::from_str(text.trim()).ok()
 }
 
-/// Source files (tests left out) added, changed or removed since the run started, relative to
-/// the folder the run was opened in. Empty when the run has no start manifest.
-fn changed_source_files(run: &Path) -> Result<Vec<String>> {
-    let Ok(text) = fs::read_to_string(run.join(START_MANIFEST)) else {
-        return Ok(Vec::new());
+/// What a step has to answer for: files that changed since the last certified step (or the start)
+/// and that a reviewer must look at (code and tests). `None` when the run cannot know.
+fn review_files(run: &Path) -> Result<Option<Vec<String>>> {
+    let status = log_events(run)?
+        .iter()
+        .find(|e| event_is(e, "event", "start"))
+        .and_then(|e| e.get("manifest").map(value_str))
+        .unwrap_or_default();
+    let base_path = if run.join(CERTIFIED_MANIFEST).exists() {
+        run.join(CERTIFIED_MANIFEST)
+    } else {
+        run.join(START_MANIFEST)
     };
-    let start: BTreeMap<String, String> = serde_json::from_str(&text).unwrap_or_default();
-    let Some(cwd) = run_cwd(run) else {
-        return Ok(Vec::new());
+    let Ok(text) = fs::read_to_string(&base_path) else {
+        if status.is_empty() || status.starts_with("unavailable") {
+            return Ok(None);
+        }
+        return Err(format!(
+            "the run's start manifest ({}) is missing although it was recorded; it cannot be certified without it",
+            base_path.display()
+        ));
     };
-    let now = dir_manifest(Path::new(&cwd))?;
+    let base: BTreeMap<String, String> = serde_json::from_str(&text).unwrap_or_default();
+    let now = dir_manifest(&run_root(run)?)?;
     let mut changed = Vec::new();
     for (path, hash) in &now {
-        if start.get(path) != Some(hash) && is_source_path(path) {
+        if base.get(path) != Some(hash) && needs_review_path(path) {
             changed.push(path.clone());
         }
     }
-    for path in start.keys() {
-        if !now.contains_key(path) && is_source_path(path) {
+    for path in base.keys() {
+        if !now.contains_key(path) && needs_review_path(path) {
             changed.push(format!("{path} (removed)"));
         }
     }
-    Ok(changed)
+    Ok(Some(changed))
 }
 
-/// What a reviewer judges: not tests, not logs, transcripts, temp or backup files, not
-/// anything under a dot-folder (`.claude`, `.sw-home`, `.idea`), which hosts and tools write
-/// during any run.
-fn is_source_path(rel: &str) -> bool {
-    if is_test_path(rel) {
+/// Source files (tests left out) changed since the last certified step or the start, for the packet.
+fn changed_source_files(run: &Path) -> Result<Vec<String>> {
+    Ok(review_files(run)?
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| !is_test_path(p.trim_end_matches(" (removed)")))
+        .collect())
+}
+
+/// Code by extension or name, plus tests: what a reviewer must hold against the contract.
+fn needs_review_path(rel: &str) -> bool {
+    const CODE_EXT: &[&str] = &[
+        ".py", ".pyi", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rs", ".go", ".java", ".kt",
+        ".kts", ".rb", ".php", ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".cs", ".swift",
+        ".m", ".mm", ".sh", ".bash", ".zsh", ".ps1", ".sql", ".scala", ".dart", ".lua", ".pl",
+        ".pm", ".ex", ".exs", ".erl", ".hs", ".ml", ".clj", ".r", ".jl", ".vue", ".svelte",
+        ".yml", ".yaml", ".toml", ".json", ".ini", ".cfg", ".html", ".css", ".scss",
+    ];
+    const CODE_NAMES: &[&str] = &["makefile", "dockerfile", "justfile", "rakefile", "gemfile", "procfile"];
+    if is_noise_path(rel) {
         return false;
     }
-    if rel.split('/').any(|seg| seg.starts_with('.') && seg.len() > 1) {
-        return false;
+    if is_test_path(rel) {
+        return true;
     }
     let lower = rel.to_lowercase();
-    const NOISE: &[&str] = &[".log", ".jsonl", ".tmp", ".bak", ".swp", ".orig", ".pyc", ".pyo", ".class", ".o"];
-    !NOISE.iter().any(|ext| lower.ends_with(ext))
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    CODE_NAMES.contains(&name) || CODE_EXT.iter().any(|e| lower.ends_with(e))
 }
 
 /// Test files by the usual conventions: a tests/test/__tests__/spec folder, test_*.py, *_test.py,
@@ -1117,45 +1223,41 @@ fn is_test_path(rel: &str) -> bool {
         || name == "conftest.py"
 }
 
-/// Does this check run a test suite? Word sequences of the common runners, anywhere in the
-/// command (`python -m pytest tests`, `npm test`, `cargo test --all`).
-fn is_test_command(cmd: &str) -> bool {
-    const RUNNERS: &[&str] = &[
-        "pytest", "unittest", "npm test", "pnpm test", "yarn test", "bun test", "cargo test",
-        "go test", "jest", "vitest", "mocha", "phpunit", "rspec", "make test", "make check",
-        "tox", "nox", "dotnet test", "mvn test", "gradle test", "gradlew test", "swift test",
-        "mix test", "ctest", "deno test",
-    ];
-    let words: Vec<String> = cmd
-        .split(|c: char| c.is_whitespace() || c == ';' || c == '&' || c == '|' || c == '(' || c == ')')
-        .filter(|w| !w.is_empty())
-        .map(|w| w.rsplit('/').next().unwrap_or(w).to_string())
-        .collect();
-    RUNNERS.iter().any(|runner| {
-        let parts: Vec<&str> = runner.split(' ').collect();
-        words.windows(parts.len()).any(|w| w.iter().zip(&parts).all(|(a, b)| a == b))
-    })
-}
-
-/// The latest reviewer verdict logged for a step, with the tree it was given on.
-fn review_verdict(run: &Path, step: &str) -> Result<Option<(String, String)>> {
+/// The latest reviewer verdict logged for a step and where it sits in the log, so `done` can
+/// tell whether it came after the receipt it certifies.
+fn review_verdict(run: &Path, step: &str) -> Result<Option<(String, usize)>> {
     Ok(log_events(run)?
         .iter()
+        .enumerate()
         .rev()
-        .find(|e| event_is(e, "step", step) && e.contains_key("review"))
-        .map(|e| {
-            (
-                e.get("review").map(value_str).unwrap_or_default(),
-                e.get("tree").map(value_str).unwrap_or_default(),
-            )
-        }))
+        .find(|(_, e)| event_is(e, "step", step) && e.contains_key("review"))
+        .map(|(i, e)| (e.get("review").map(value_str).unwrap_or_default(), i)))
+}
+
+fn latest_receipt_index(run: &Path, step: &str) -> Result<Option<usize>> {
+    Ok(log_events(run)?
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, e)| event_is(e, "event", "receipt") && event_is(e, "step", step))
+        .map(|(i, _)| i))
 }
 
 fn verdict_file(run: &Path, step: &str) -> PathBuf {
     run.join("checks").join(format!("step-{step}-review.md"))
 }
 
-/// A verdict says PASS or FAIL first, and a PASS names every changed source file: a file the
+/// Is `base` present in `text` as a whole name (not inside a longer one)?
+fn names_file(text: &str, base: &str) -> bool {
+    let is_name_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.' | '-');
+    text.match_indices(base).any(|(i, _)| {
+        let before = text[..i].chars().next_back();
+        let after = text[i + base.len()..].chars().next();
+        !before.is_some_and(is_name_char) && !after.is_some_and(is_name_char)
+    })
+}
+
+/// A verdict says PASS or FAIL first, and a PASS names every file under review: a file the
 /// reviewer never mentioned is a file the reviewer never judged.
 fn check_verdict_shape(run: &Path, result: &str, verdict: &Path) -> Result<()> {
     let text = fs::read_to_string(verdict)
@@ -1179,17 +1281,18 @@ fn check_verdict_shape(run: &Path, result: &str, verdict: &Path) -> Result<()> {
         ));
     }
     if result == "pass" {
-        let missing: Vec<String> = changed_source_files(run)?
+        let missing: Vec<String> = review_files(run)?
+            .unwrap_or_default()
             .into_iter()
-            .filter(|p| !p.ends_with(" (removed)"))
+            .map(|p| p.trim_end_matches(" (removed)").to_string())
             .filter(|p| {
                 let base = p.rsplit('/').next().unwrap_or(p);
-                !text.contains(base)
+                !names_file(&text, base)
             })
             .collect();
         if !missing.is_empty() {
             return Err(format!(
-                "the verdict does not mention {}; a PASS names every changed source file with what it documents and whether that holds",
+                "the verdict does not mention {}; a PASS names every changed file with what it documents and whether that holds",
                 missing.join(", ")
             ));
         }
@@ -1558,6 +1661,7 @@ fn load_guards(workspace: &Path) -> Vec<(gate::Verdict, String)> {
 fn run_check(store: &Store, run: &Path, step: &str) -> Result<()> {
     let cmd = step_command(run, step)?;
     require_consent(store, run, step)?;
+    let root = require_inside_run_root(run)?;
     // The check runs a command: it goes through the gate like any other, and an outward
     // command inside a check needs the same consent as an outward step.
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -1610,7 +1714,7 @@ fn run_check(store: &Store, run: &Path, step: &str) -> Result<()> {
         log_path = checks.join(format!("{step}-{stamp}-{n}.log"));
     }
     fs::write(&log_path, &text).map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
-    let tree = worktree_hash()?;
+    let tree = worktree_hash_at(&root)?;
     event.insert("exit".into(), code.into());
     event.insert("ok".into(), (code == 0).into());
     event.insert("secs".into(), ((secs * 10.0).round() / 10.0).into());
@@ -1688,7 +1792,8 @@ fn run_done(store: &Store, run: &Path, step: &str) -> Result<()> {
         ));
     }
     let then = receipt.get("tree").map(value_str).unwrap_or_default();
-    let tree = worktree_hash()?;
+    let root = require_inside_run_root(run)?;
+    let tree = worktree_hash_at(&root)?;
     if then != tree {
         return Err(format!(
             "step {step}: stale receipt: the working tree changed since the check (was {}, now {}); run `sw run check` again",
@@ -1696,33 +1801,35 @@ fn run_done(store: &Store, run: &Path, step: &str) -> Result<()> {
             short(&tree)
         ));
     }
-    if is_test_command(&cmd) {
-        let changed = changed_source_files(run)?;
-        if !changed.is_empty() {
-            let name = file_name(run);
-            let verdict = verdict_file(run, step);
-            match review_verdict(run, step)? {
-                Some((v, t)) if v == "pass" && t == tree => {}
-                Some((v, _)) if v == "fail" => {
-                    return Err(format!(
-                        "step {step}: the reviewer failed it; fix the work, run `sw run check {name} {step}`, review again, then `sw run done`"
-                    ))
-                }
-                Some(_) => {
-                    return Err(format!(
-                        "step {step}: the review verdict was given on an earlier state of the files; run `sw run review {name} {step}` again, log the new verdict, then `sw run done`"
-                    ))
-                }
-                None => {
-                    return Err(format!(
-                        "step {step}: {} changed since the run started and the check is the test suite; a passing suite is not the whole contract. \
-                         Run `sw run review {name} {step}`, give the packet to a fresh read-only reviewer on the small model (sw-verify), \
-                         have it write the verdict to {}, log it with `sw run log {name} step={step} result=pass|fail evidence=\"{}\"`, then `sw run done` again.",
-                        changed.join(", "),
-                        verdict.display(),
-                        verdict.display()
-                    ))
-                }
+    let name = file_name(run);
+    let verdict = verdict_file(run, step);
+    let needs = match review_files(run)? {
+        None => Some("the run could not record what this folder held when it started, so nothing can say which files this step changed".to_string()),
+        Some(list) if !list.is_empty() => Some(format!("{} changed since the run started (or the last certified step)", list.join(", "))),
+        Some(_) => None,
+    };
+    if let Some(why) = needs {
+        let receipt_at = latest_receipt_index(run, step)?.unwrap_or(0);
+        match review_verdict(run, step)? {
+            Some((v, at)) if v == "pass" && at > receipt_at => {}
+            Some((v, _)) if v == "fail" => {
+                return Err(format!(
+                    "step {step}: the reviewer failed it; fix the work, run `sw run check {name} {step}`, review again, then `sw run done`"
+                ))
+            }
+            Some(_) => {
+                return Err(format!(
+                    "step {step}: the review verdict was given before the latest check, on an earlier state of the files; run `sw run review {name} {step}` again, log the new verdict, then `sw run done`"
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "step {step}: {why}; a passing check is not the whole contract. \
+                     Run `sw run review {name} {step}`, give the packet to a fresh read-only reviewer on the small model (sw-verify), \
+                     save its reply verbatim to {}, log it with `sw run log {name} step={step} result=pass|fail evidence=\"{}\"`, then `sw run done {name} {step}`.",
+                    verdict.display(),
+                    verdict.display()
+                ))
             }
         }
     }
@@ -1747,6 +1854,12 @@ fn run_done(store: &Store, run: &Path, step: &str) -> Result<()> {
         event.insert("snapshot".into(), commit.into());
     }
     append_json(run, event)?;
+    if let Ok(m) = dir_manifest(&root) {
+        if let Ok(text) = serde_json::to_string(&m) {
+            let _ = fs::write(run.join(CERTIFIED_MANIFEST), text);
+        }
+    }
+    let _ = write_baseline(store, &root);
     println!(
         "step {step}: done, certified (`{cmd}` exit 0 on tree {})",
         short(&tree)
@@ -1755,7 +1868,8 @@ fn run_done(store: &Store, run: &Path, step: &str) -> Result<()> {
 }
 
 /// Keys only sw writes: hand-logging them would forge a receipt, a snapshot or a certificate.
-const SW_KEYS: [&str; 16] = [
+const SW_KEYS: [&str; 17] = [
+    "review",
     "event",
     "ok",
     "log",
@@ -2400,11 +2514,15 @@ fn run_stop(store: &Store, hook: bool) -> Result<()> {
 }
 
 fn run_brief(store: &Store, hook: bool) -> Result<()> {
-    // With --hook, the SessionStart event on stdin: record the baseline for the session's folder
-    // first, so a run opened later in this session sees every change the session made, not only
-    // those after `sw run new`. Quiet on failure: the brief must never block a session start.
+    // With --hook, the host's SessionStart event is on stdin. The brief prints first (it is what
+    // the host must have); then the session baseline is recorded for the event's folder, on a
+    // fresh start or when none is fresh, so a run opened later sees every change the session
+    // made, not only those after `sw run new`. A resume or a compaction keeps the earlier one.
     // Without --hook stdin is never read: a pipe with no writer would block forever.
-    if let Some(event) = hook.then(hook_event_on_stdin).flatten() {
+    let event = hook.then(hook_event_on_stdin).flatten();
+    let printed = print_brief(store);
+    if let Some(event) = event {
+        let source = event.get("source").map(value_str).unwrap_or_default();
         let dir = event
             .get("cwd")
             .map(value_str)
@@ -2412,11 +2530,16 @@ fn run_brief(store: &Store, hook: bool) -> Result<()> {
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok());
         if let Some(dir) = dir {
-            if dir.is_dir() {
+            let fresh = fresh_baseline(store, &dir).ok().flatten().is_some();
+            if dir.is_dir() && (source == "startup" || !fresh) {
                 let _ = write_baseline(store, &dir);
             }
         }
     }
+    printed
+}
+
+fn print_brief(store: &Store) -> Result<()> {
     // The newest open run started in this folder (or a parent or child of it): a run from
     // another project must not leak into this session's context.
     let here = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -3428,36 +3551,14 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             plan,
             freeze,
         } => {
-            // The goal first, so a bad id or an empty text refuses before anything is created.
-            let goal_id = match goal.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
-                None => String::new(),
-                Some(g) if g.bytes().all(|b| b.is_ascii_digit()) => {
-                    let goals: Vec<Goal> = store.load("goals.json")?;
-                    let id: u64 = g.parse().map_err(|_| format!("goal id {g} is out of range"))?;
-                    if !goals.iter().any(|x| x.id == id) {
-                        return Err(format!("goal {id} not found (`sw goal list`), or give the goal's text to create it"));
-                    }
-                    g.to_string()
-                }
-                Some(text) => {
-                    let mut goals: Vec<Goal> = store.load("goals.json")?;
-                    let id = next_id(goals.iter().map(|x| x.id));
-                    goals.push(Goal {
-                        id,
-                        text: text.to_string(),
-                        priority: 3,
-                        status: "open".into(),
-                        created: now(),
-                        closed: None,
-                        note: None,
-                    });
-                    store.save("goals.json", &goals)?;
-                    id.to_string()
-                }
-            };
+            // Everything that can refuse comes first; the goal and the folder are created last.
             let plan_text = match plan.as_deref() {
                 None => None,
                 Some("-") => {
+                    use std::io::IsTerminal;
+                    if std::io::stdin().is_terminal() {
+                        return Err("--plan - reads the plan from stdin; pipe it in or give a file".into());
+                    }
                     let mut text = String::new();
                     std::io::stdin()
                         .read_to_string(&mut text)
@@ -3476,6 +3577,47 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                     );
                 }
             }
+            let cwd = std::env::current_dir()
+                .ok()
+                .and_then(|d| fs::canonicalize(d).ok())
+                .map(|d| d.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let (manifest_status, manifest) = if cwd.is_empty() {
+                ("unavailable: no current directory".to_string(), None)
+            } else {
+                start_manifest(store, Path::new(&cwd))
+            };
+            let goal_id = match goal.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
+                None => String::new(),
+                Some(g) => {
+                    let mut goals: Vec<Goal> = store.load("goals.json")?;
+                    let numeric: Option<u64> = g.parse().ok();
+                    if let Some(id) = numeric {
+                        if !goals.iter().any(|x| x.id == id) {
+                            return Err(format!(
+                                "goal {id} not found (`sw goal list`); to create a goal give its text, for example --goal \"Fix {id}\""
+                            ));
+                        }
+                    }
+                    match numeric {
+                        Some(id) => id.to_string(),
+                        None => {
+                            let id = next_id(goals.iter().map(|x| x.id));
+                            goals.push(Goal {
+                                id,
+                                text: g.to_string(),
+                                priority: 3,
+                                status: "open".into(),
+                                created: now(),
+                                closed: None,
+                                note: None,
+                            });
+                            store.save("goals.json", &goals)?;
+                            id.to_string()
+                        }
+                    }
+                }
+            };
             let base = format!(
                 "{}-{}",
                 chrono::Local::now().format("%Y%m%d-%H%M%S"),
@@ -3491,13 +3633,10 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             fs::create_dir_all(&dir)
                 .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
             File::create(dir.join("log.jsonl")).map_err(|e| e.to_string())?;
-            let cwd = std::env::current_dir()
-                .ok()
-                .and_then(|d| fs::canonicalize(d).ok())
-                .map(|d| d.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if !cwd.is_empty() {
-                write_start_manifest(store, &dir, Path::new(&cwd))?;
+            if let Some(m) = &manifest {
+                let text = serde_json::to_string(m).map_err(|e| e.to_string())?;
+                fs::write(dir.join(START_MANIFEST), text)
+                    .map_err(|e| format!("cannot write the start manifest: {e}"))?;
             }
             append_event(
                 &dir,
@@ -3505,6 +3644,7 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                     ("event".into(), "start".into()),
                     ("cwd".into(), cwd),
                     ("goal".into(), goal_id),
+                    ("manifest".into(), manifest_status),
                 ],
             )?;
             if let Some(text) = plan_text {
@@ -3542,6 +3682,9 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             if p.total() == 0 {
                 return Err(format!("run {name} has no plan.md; nothing to finish"));
             }
+            if log_events(&dir)?.iter().any(|e| event_is(e, "event", "finish")) {
+                return Err(format!("run {name} is already finished"));
+            }
             let goal_id = log_events(&dir)?
                 .iter()
                 .find(|e| event_is(e, "event", "start"))
@@ -3577,6 +3720,10 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                 plan_sha256: plan_hash(&dir),
             });
             store.save("inbox.json", &cards)?;
+            append_event(&dir, &[("event".into(), "finish".into()), ("card".into(), id.to_string())])?;
+            if let Ok(root) = run_root(&dir) {
+                let _ = write_baseline(store, &root);
+            }
             println!("inbox {id} (notify) added{closed}");
         }
         RunCmd::Log { run, pairs } => {
@@ -3634,7 +3781,7 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                         let mut pairs = with_evidence(parsed, &dir, &run, &step)?;
                         pairs.retain(|(k, _)| k != "result" && k != "check");
                         pairs.push(("review".into(), result.clone()));
-                        pairs.push(("tree".into(), worktree_hash()?));
+                        pairs.push(("tree".into(), worktree_hash_at(&run_root(&dir)?)?));
                         note_plan(&dir)?;
                         append_event(&dir, &pairs)?;
                         if result == "pass" {
