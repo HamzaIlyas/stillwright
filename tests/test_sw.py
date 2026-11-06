@@ -30,6 +30,10 @@ class SwTestCase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.home = pathlib.Path(self.tmp.name)
         self.env = {**os.environ, "STILLWRIGHT_HOME": self.tmp.name}
+        # Every sw call runs in a neutral folder unless a test says otherwise: a run opened in the
+        # test process's own folder would bind, snapshot and review the real repository.
+        self.default_cwd = self.home / "cwd"
+        self.default_cwd.mkdir()
 
     def evidence(self, text="PASS: checked by hand in a test\n"):
         """A non-empty file a hand-logged pass can point at."""
@@ -38,7 +42,7 @@ class SwTestCase(unittest.TestCase):
         return f"evidence={path}"
 
     def sw(self, *argv, cwd=None):
-        result = subprocess.run([SW, *argv], env=self.env, capture_output=True, text=True, cwd=cwd)
+        result = subprocess.run([SW, *argv], env=self.env, capture_output=True, text=True, cwd=cwd or self.default_cwd)
         if result.returncode != 0:
             raise Failed(result.stderr.strip())
         return result.stdout
@@ -411,7 +415,7 @@ class CertificateTests(SwTestCase):
         subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], cwd=self.work, check=True)
         (self.work / "tests").mkdir()
         (self.work / "tests" / "t.sh").write_text("exit 0\n")
-        self.run = pathlib.Path(self.sw("run", "new", "cert").strip())
+        self.run = pathlib.Path(self.sw("run", "new", "cert", cwd=self.work).strip())
         (self.run / "plan.md").write_text(
             "# Goal: x\n1. a | check: $ sh tests/t.sh\n2. b | check: reviewer reads it\nOutward: none\n"
         )
@@ -428,7 +432,7 @@ class CertificateTests(SwTestCase):
         receipt = self.receipts()[-1]
         self.assertEqual(receipt["cmd"], "sh tests/t.sh")
         self.assertEqual(receipt["exit"], 0)
-        self.assertEqual(len(receipt["tree"]), 40)
+        self.assertTrue(receipt["tree"].startswith("dir:") and len(receipt["tree"]) == 68)
         self.assertEqual(len(receipt["out_sha256"]), 64)
         logs = list((self.run / "checks").glob("1-*.log"))
         self.assertEqual(len(logs), 1)
@@ -453,7 +457,7 @@ class CertificateTests(SwTestCase):
         with self.assertRaises(Failed) as cm:
             self.sw("run", "log", "latest", "step=1", "result=pass")
         self.assertIn("sw run check", str(cm.exception))
-        self.assertEqual([e for e in self.events() if e.get("event") != "start"], [])
+        self.assertEqual([e for e in self.events() if e.get("event") not in ("start", "start-snapshot")], [])
         # a step whose check is not a command may still be logged (reviewer path)
         self.sw("run", "log", "latest", "step=2", "result=pass", self.evidence())
 
@@ -462,7 +466,7 @@ class CertificateTests(SwTestCase):
             self.sw("run", "done", "latest", "1", cwd=self.work)
         self.assertIn("no receipt", str(cm.exception))
         self.sw("run", "check", "latest", "1", cwd=self.work)
-        (self.work / "new.txt").write_text("edited after the check\n")
+        (self.work / "new.md").write_text("edited after the check\n")
         with self.assertRaises(Failed) as cm:
             self.sw("run", "done", "latest", "1", cwd=self.work)
         self.assertIn("stale", str(cm.exception))
@@ -499,6 +503,10 @@ class CertificateTests(SwTestCase):
         # an explicit re-freeze is the only way on, and it stays in the log
         self.sw("run", "freeze", "latest", "tests", cwd=self.work)
         self.sw("run", "check", "latest", "1", cwd=self.work)
+        # a changed test file is a change under review: the fresh reviewer's verdict comes first
+        verdict = self.run / "checks" / "step-1-review.md"
+        verdict.write_text("PASS: tests/t.sh was re-frozen on purpose in this test\n")
+        self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={verdict}", cwd=self.work)
         self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
 
     def test_pipes_inside_a_check_are_kept(self):
@@ -514,7 +522,7 @@ class CertificateTests(SwTestCase):
         self.assertIn("duplicate", str(cm.exception))
         with self.assertRaises(Failed):
             self.sw("run", "log", "latest", "step=2", "step=1", "result=pass")
-        self.assertEqual([e for e in self.events() if e.get("event") != "start"], [])
+        self.assertEqual([e for e in self.events() if e.get("event") not in ("start", "start-snapshot")], [])
 
     def test_done_refuses_when_the_plan_command_changed(self):
         self.sw("run", "check", "latest", "1", cwd=self.work)
@@ -539,14 +547,14 @@ class CertificateTests(SwTestCase):
         try:
             with self.assertRaises(Failed) as cm:
                 self.sw("run", "check", "latest", "1", cwd=self.work)
-            self.assertIn("git", str(cm.exception))
+            self.assertIn("cannot read", str(cm.exception))
             self.assertEqual(self.receipts(), [])
         finally:
             locked.chmod(0o644)
 
     def test_state_folder_inside_the_repo_does_not_make_receipts_stale(self):
         self.env["STILLWRIGHT_HOME"] = str(self.work / ".swh")
-        run = pathlib.Path(self.sw("run", "new", "inside").strip())
+        run = pathlib.Path(self.sw("run", "new", "inside", cwd=self.work).strip())
         (run / "plan.md").write_text("# Goal: x\n1. a | check: $ sh tests/t.sh\n")
         self.sw("run", "check", "latest", "1", cwd=self.work)
         self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
@@ -604,9 +612,10 @@ class CertificateTests(SwTestCase):
     def test_check_outside_git_still_works(self):
         plain = pathlib.Path(self.tmp.name) / "plain"
         plain.mkdir()
+        self.run = pathlib.Path(self.sw("run", "new", "plain", cwd=plain).strip())
         (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $ true\n")
         self.sw("run", "check", "latest", "1", cwd=plain)
-        self.assertEqual(self.receipts()[-1]["tree"], "none")
+        self.assertTrue(self.receipts()[-1]["tree"].startswith("dir:"))
         self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=plain))
 
 
@@ -625,7 +634,7 @@ class RewindTests(SwTestCase):
         (self.work / "tests" / "t.sh").write_text("exit 0\n")
         subprocess.run([*self.git, "add", "-A"], cwd=self.work, check=True)
         subprocess.run([*self.git, "commit", "-q", "-m", "init"], cwd=self.work, check=True)
-        self.run = pathlib.Path(self.sw("run", "new", "rew").strip())
+        self.run = pathlib.Path(self.sw("run", "new", "rew", cwd=self.work).strip())
         (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $ sh tests/t.sh\n2. b | check: $ true\n")
 
     def events(self):
@@ -646,12 +655,12 @@ class RewindTests(SwTestCase):
         return self.sw("run", "done", "latest", step, cwd=self.work)
 
     def test_done_leaves_a_snapshot_of_the_tree(self):
-        (self.work / "untracked.txt").write_text("kept\n")
+        (self.work / "untracked.md").write_text("kept\n")
         self.certify("1")
         done = self.events()[-1]
         self.assertEqual(len(done["snapshot"]), 40)
-        self.assertEqual(self.refs(), [f"refs/sw/{self.run.name}/step-1"])
-        self.assertIn("untracked.txt", self.tree_files(f"refs/sw/{self.run.name}/step-1"))
+        self.assertEqual([r for r in self.refs() if self.run.name in r], [f"refs/sw/{self.run.name}/start", f"refs/sw/{self.run.name}/step-1"])
+        self.assertIn("untracked.md", self.tree_files(f"refs/sw/{self.run.name}/step-1"))
 
     def test_rewind_restores_the_step_and_keeps_what_it_removed(self):
         self.certify("1")
@@ -689,7 +698,7 @@ class RewindTests(SwTestCase):
 
     def test_rewind_keeps_the_state_folder_inside_the_repo(self):
         self.env["STILLWRIGHT_HOME"] = str(self.work / ".swh")
-        run = pathlib.Path(self.sw("run", "new", "inside").strip())
+        run = pathlib.Path(self.sw("run", "new", "inside", cwd=self.work).strip())
         (run / "plan.md").write_text("# Goal: x\n1. a | check: $ true\n")
         self.certify("1")
         (self.work / "junk.txt").write_text("x\n")
@@ -726,6 +735,8 @@ class RewindTests(SwTestCase):
     def test_snapshot_outside_git_is_refused_but_done_still_works(self):
         plain = pathlib.Path(self.tmp.name) / "plain"
         plain.mkdir()
+        run = pathlib.Path(self.sw("run", "new", "plain", cwd=plain).strip())
+        (run / "plan.md").write_text((self.run / "plan.md").read_text())
         with self.assertRaises(Failed) as cm:
             self.sw("run", "snapshot", "latest", "1", cwd=plain)
         self.assertIn("git", str(cm.exception))
@@ -958,7 +969,7 @@ class HookTests(SwTestCase):
         start = settings["hooks"]["SessionStart"]
         self.assertEqual(len(start), 1)
         self.assertIn("compact", start[0]["matcher"])
-        self.assertEqual(start[0]["hooks"][0]["command"], "sw run brief")
+        self.assertEqual(start[0]["hooks"][0]["command"], "sw run brief --hook")
         stop = settings["hooks"]["Stop"]
         self.assertEqual(len(stop), 1)
         self.assertNotIn("matcher", stop[0])  # Stop has no matcher; it fires on every stop
@@ -971,7 +982,7 @@ class HookTests(SwTestCase):
         self.assertEqual(plugin["PreToolUse"][0]["matcher"], "Bash")
         self.assertTrue(any(c.endswith("sw gate --hook") for c in commands["PreToolUse"]), commands)
         self.assertIn("compact", plugin["SessionStart"][0]["matcher"])
-        self.assertTrue(any(c.endswith("sw run brief") for c in commands["SessionStart"]), commands)
+        self.assertTrue(any(c.endswith("sw run brief --hook") for c in commands["SessionStart"]), commands)
         self.assertNotIn("matcher", plugin["Stop"][0])
         # the Stop hook blocks only through JSON on stdout, so its exit code is always 0: an older
         # sw without `run stop` (clap exits 2 on an unknown subcommand) must never hold a turn
@@ -1261,7 +1272,7 @@ class StatsTests(SwTestCase):
     def test_certified_steps_count_once_with_their_route_and_tokens(self):
         work = pathlib.Path(self.tmp.name) / "w"
         work.mkdir()
-        run = pathlib.Path(self.sw("run", "new", "c").strip())
+        run = pathlib.Path(self.sw("run", "new", "c", cwd=work).strip())
         (run / "plan.md").write_text("# Goal: g\n1. a | who: worker | check: $ true\n2. b | who: worker | check: $ false\n")
         self.sw("run", "log", "latest", "step=1", "who=worker", "model=haiku", "in=1000", "out=200")
         self.sw("run", "log", "latest", "step=1", "who=worker", "model=haiku", "in=500", "out=100", "note=retry")
@@ -1413,7 +1424,7 @@ class ReviewGateTests(SwTestCase):
             self.sw("run", "log", "latest", "step=1", "result=pass")
         self.assertIn("evidence=", str(cm.exception))
         self.assertIn("sw run review", str(cm.exception))
-        self.assertEqual([e for e in self.events() if e.get("event") != "start"], [])
+        self.assertEqual([e for e in self.events() if e.get("event") not in ("start", "start-snapshot")], [])
 
     def test_missing_or_empty_evidence_is_refused(self):
         with self.assertRaises(Failed) as cm:
@@ -1424,7 +1435,7 @@ class ReviewGateTests(SwTestCase):
         with self.assertRaises(Failed) as cm:
             self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={empty}")
         self.assertIn("empty", str(cm.exception))
-        self.assertEqual([e for e in self.events() if e.get("event") != "start"], [])
+        self.assertEqual([e for e in self.events() if e.get("event") not in ("start", "start-snapshot")], [])
 
     def test_evidence_is_stored_absolute_with_its_hash(self):
         verdict = self.home / "verdict.md"
@@ -1465,7 +1476,7 @@ class ReviewPacketTests(SwTestCase):
         (self.work / "tests" / "t.sh").write_text("echo check-output-here; exit 0\n")
         subprocess.run([*self.git, "add", "-A"], cwd=self.work, check=True)
         subprocess.run([*self.git, "commit", "-q", "-m", "init"], cwd=self.work, check=True)
-        self.run = pathlib.Path(self.sw("run", "new", "rev").strip())
+        self.run = pathlib.Path(self.sw("run", "new", "rev", cwd=self.work).strip())
         (self.run / "plan.md").write_text(
             "# Goal: ship the thing\nMust not: touch prod\n"
             "1. a | check: $ sh tests/t.sh\n2. write the post | check: five lines, has the date | after: 1\n"
@@ -1496,7 +1507,7 @@ class ReviewPacketTests(SwTestCase):
     def test_packet_without_a_snapshot_diffs_against_head(self):
         (self.work / "a.txt").write_text("v1\nfresh\n")
         out = self.sw("run", "review", "latest", "2", cwd=self.work)
-        self.assertIn("since HEAD", out)
+        self.assertIn("since the start of the run", out)
         self.assertIn("+fresh", out)
 
     def test_packet_includes_the_latest_check_output(self):
@@ -1515,14 +1526,18 @@ class ReviewPacketTests(SwTestCase):
         fresh = pathlib.Path(self.tmp.name) / "fresh"
         fresh.mkdir()
         subprocess.run([*self.git, "init", "-q"], cwd=fresh, check=True)
+        run = pathlib.Path(self.sw("run", "new", "fresh", cwd=fresh).strip())
+        (run / "plan.md").write_text((self.run / "plan.md").read_text())
         (fresh / "only.md").write_text("brand new\n")
         out = self.sw("run", "review", "latest", "2", cwd=fresh)
-        self.assertIn("since an empty repository", out)
+        self.assertIn("since the start of the run", out)
         self.assertIn("+brand new", out)
 
     def test_packet_outside_git_still_works(self):
         plain = pathlib.Path(self.tmp.name) / "plain"
         plain.mkdir()
+        run = pathlib.Path(self.sw("run", "new", "plain", cwd=plain).strip())
+        (run / "plan.md").write_text((self.run / "plan.md").read_text())
         out = self.sw("run", "review", "latest", "2", cwd=plain)
         self.assertIn("no git repository", out)
         self.assertIn("Check: five lines, has the date", out)
@@ -1542,7 +1557,7 @@ class ReviewHardeningTests(SwTestCase):
         (self.work / "tests" / "t.sh").write_text("echo real-output; exit 0\n")
         subprocess.run([*self.git, "add", "-A"], cwd=self.work, check=True)
         subprocess.run([*self.git, "commit", "-q", "-m", "init"], cwd=self.work, check=True)
-        self.run = pathlib.Path(self.sw("run", "new", "hard").strip())
+        self.run = pathlib.Path(self.sw("run", "new", "hard", cwd=self.work).strip())
         self.plan = "# Goal: g\n1. a | check: $ sh tests/t.sh\n2. b | check: has the date\n3. c | check: $ true\n"
         (self.run / "plan.md").write_text(self.plan)
 
@@ -1559,7 +1574,7 @@ class ReviewHardeningTests(SwTestCase):
             with self.assertRaises(Failed, msg=key) as cm:
                 self.sw("run", "log", "latest", "step=1", f"{key}=x")
             self.assertIn(key, str(cm.exception))
-        self.assertEqual([e for e in self.events() if e.get("event") != "start"], [])
+        self.assertEqual([e for e in self.events() if e.get("event") not in ("start", "start-snapshot")], [])
 
     def test_packet_ignores_a_receipt_whose_command_is_not_the_plans(self):
         self.sw("run", "check", "latest", "1", cwd=self.work)
@@ -1589,9 +1604,11 @@ class ReviewHardeningTests(SwTestCase):
         self.sw("run", "snapshot", "latest", "2", cwd=self.work)
         (self.work / "two.txt").write_text("step 2 work\n")
         out = self.sw("run", "review", "latest", "2", cwd=self.work)
-        self.assertIn("since the snapshot before step 2", out)
-        self.assertIn("two.txt", out)
-        self.assertNotIn("one.txt", out)
+        # one.txt changed before the snapshot and nobody reviewed it, so the snapshot did not move
+        # the review base and the packet shows both changes
+        self.assertIn("+step 2 work", out)
+        self.assertIn("+step 1 work", out)
+        self.assertIn("one.txt", out)
 
     def test_evidence_inside_the_run_folder_or_blank_is_refused(self):
         for bad in (self.run / "plan.md", self.run / "log.jsonl"):
@@ -1663,7 +1680,7 @@ class ReviewHardeningTests(SwTestCase):
                       ("step=2", "result=PASS"), ("step=2", "result=maybe")):
             with self.assertRaises(Failed, msg=pairs):
                 self.sw("run", "log", "latest", *pairs)
-        self.assertEqual([e for e in self.events() if e.get("event") != "start"], [])
+        self.assertEqual([e for e in self.events() if e.get("event") not in ("start", "start-snapshot")], [])
 
     def test_evidence_path_is_canonical(self):
         v = self.verdict()
@@ -1921,3 +1938,1076 @@ class ConsentHardeningTests(ConsentCase):
         self.assertEqual(len(token), 8)
         ends = [l for l in out.splitlines() if "end of tool output [" in l]
         self.assertTrue(ends and all(f"[{token}]" in l for l in ends))
+
+
+class NoGitReceiptTests(SwTestCase):
+    """Outside a git repository the receipt binds a hash of the folder's files, so a change after
+    the check is caught there too (pilot 5: every eval receipt carried tree `none`)."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        self.work.mkdir()
+        (self.work / "mod.py").write_text("X = 1\n")
+        run = pathlib.Path(self.sw("run", "new", "nogit", cwd=self.work).strip())
+        (run / "plan.md").write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        self.run = run
+
+    def test_done_refuses_when_a_file_changed_after_the_check(self):
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.work / "mod.py").write_text("X = 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("stale receipt", str(cm.exception))
+
+    def test_done_passes_and_the_receipt_names_a_folder_hash(self):
+        out = self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertNotIn("tree none", out)
+        self.assertIn("tree dir:", out)
+        done = self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("certified", done)
+        events = [json.loads(l) for l in (self.run / "log.jsonl").read_text().splitlines() if l.strip()]
+        trees = {e.get("tree") for e in events if e.get("tree")}
+        self.assertEqual(len(trees), 1)
+        self.assertTrue(next(iter(trees)).startswith("dir:"))
+
+    def test_state_folder_inside_the_work_folder_does_not_make_the_receipt_stale(self):
+        env = {**self.env, "STILLWRIGHT_HOME": str(self.work / ".sw-home")}
+        def sw(*argv):
+            r = subprocess.run([SW, *argv], env=env, capture_output=True, text=True, cwd=self.work)
+            if r.returncode != 0:
+                raise Failed(r.stderr.strip())
+            return r.stdout
+        run = pathlib.Path(sw("run", "new", "inside").strip())
+        (run / "plan.md").write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        sw("run", "check", "latest", "1")
+        self.assertIn("certified", sw("run", "done", "latest", "1"))
+
+    def test_done_no_longer_says_the_receipt_is_untied(self):
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        r = subprocess.run([SW, "run", "done", "latest", "1"], env=self.env, capture_output=True, text=True, cwd=self.work)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("not tied to the files", r.stderr)
+        self.assertIn("no git repository", r.stderr)
+
+
+class ContractReviewTests(SwTestCase):
+    """A code step whose check is the test suite is certified only after a fresh reviewer judged
+    the change against what the touched files document (pilot 5: every receipt certified the
+    visible pytest, including shallow fixes)."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        (self.work / "tests").mkdir(parents=True)
+        (self.work / "mod.py").write_text('"""Pages are numbered from 1; out of range raises IndexError."""\n\ndef page_count(n, size):\n    return n // size + 1\n')
+        (self.work / "tests" / "test_mod.py").write_text("import unittest\nfrom mod import page_count\n\nclass T(unittest.TestCase):\n    def test_count(self):\n        self.assertEqual(page_count(11, 5), 3)\n")
+        self.run = pathlib.Path(self.sw("run", "new", "contract", cwd=self.work).strip())
+        self.suite = "$ python3 -m unittest discover -s tests"
+        (self.run / "plan.md").write_text(f"# Goal: fix page_count\nMust not: edit tests\n1. fix | check: {self.suite}\nOutward: none\n")
+        self.verdict = self.run / "checks" / "step-1-review.md"
+
+    def fix(self):
+        (self.work / "mod.py").write_text('"""Pages are numbered from 1; out of range raises IndexError."""\n\ndef page_count(n, size):\n    return -(-n // size)\n')
+
+    def test_done_waits_for_the_reviewer_when_source_changed_and_the_check_is_the_suite(self):
+        self.fix()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        msg = str(cm.exception)
+        self.assertIn("review", msg)
+        self.assertIn("mod.py", msg)
+        packet = self.sw("run", "review", "latest", "1", cwd=self.work)
+        self.assertIn("mod.py", packet)
+        self.assertIn("-(-n // size)", packet)
+        self.assertIn("document", packet)
+        self.verdict.parent.mkdir(exist_ok=True)
+        self.verdict.write_text("PASS: mod.py rounds up as documented; IndexError is not touched by this step\n")
+        out = self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={self.verdict}", cwd=self.work)
+        self.assertIn("review", out)
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+        events = [json.loads(l) for l in (self.run / "log.jsonl").read_text().splitlines() if l.strip()]
+        self.assertTrue(any(e.get("review") == "pass" and e.get("step") == "1" for e in events))
+        # the review verdict is not the step's pass: only the certificate is
+        self.assertFalse(any(e.get("result") == "pass" and not e.get("certified") for e in events))
+
+    def test_no_source_change_needs_no_reviewer(self):
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_any_command_check_needs_the_reviewer_once_code_changed(self):
+        # the agent writes the check, so its wording cannot decide whether the review happens
+        (self.run / "plan.md").write_text("# Goal: g\nMust not: x\n1. fix | check: $ true\nOutward: none\n")
+        self.fix()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+    def test_a_docs_only_change_needs_no_reviewer(self):
+        (self.work / "README.md").write_text("notes\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_a_verdict_must_be_the_file_the_packet_names(self):
+        self.fix()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "log", "latest", "step=1", "result=pass", self.evidence(), cwd=self.work)
+        self.assertIn("not evidence", str(cm.exception))
+
+    def test_a_failed_review_blocks_done(self):
+        self.fix()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.verdict.parent.mkdir(exist_ok=True)
+        self.verdict.write_text("FAIL: page() still does not raise IndexError as documented\n")
+        self.sw("run", "log", "latest", "step=1", "result=fail", f"evidence={self.verdict}", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("reviewer", str(cm.exception))
+
+    def test_a_verdict_written_before_the_last_change_is_stale(self):
+        self.fix()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.verdict.parent.mkdir(exist_ok=True)
+        self.verdict.write_text("PASS: mod.py as documented\n")
+        self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={self.verdict}", cwd=self.work)
+        (self.work / "mod.py").write_text('"""doc"""\n\ndef page_count(n, size):\n    return max(1, -(-n // size))\n')
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+    def test_an_unfrozen_test_file_change_needs_the_reviewer_too(self):
+        (self.work / "tests" / "test_more.py").write_text("import unittest\nclass U(unittest.TestCase):\n    def test_ok(self):\n        pass\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("test_more.py", str(cm.exception))
+
+    def test_inside_a_git_repository_the_same_rule_holds(self):
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+        subprocess.run([*git, "init", "-q"], cwd=self.work, check=True)
+        subprocess.run([*git, "add", "-A"], cwd=self.work, check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "base"], cwd=self.work, check=True)
+        run = pathlib.Path(self.sw("run", "new", "gitcontract", cwd=self.work).strip())
+        (run / "plan.md").write_text(f"# Goal: fix page_count\nMust not: edit tests\n1. fix | check: {self.suite}\nOutward: none\n")
+        self.fix()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+
+class ThreeCallTests(SwTestCase):
+    """A small task in three sw calls: `run new --goal <text> --plan <file> --freeze <paths>`,
+    `run prove`, `run finish` (pilot 5: six calls per run, and a third of runs skipped them)."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        (self.work / "tests").mkdir(parents=True)
+        (self.work / "tests" / "t.sh").write_text("exit 0\n")
+        self.plan = self.work / "plan.txt"
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ sh tests/t.sh\nOutward: none\n")
+
+    def test_new_with_goal_text_creates_the_goal_and_binds_it(self):
+        run = pathlib.Path(self.sw("run", "new", "ship", "--goal", "Ship the thing", cwd=self.work).strip())
+        self.assertTrue(run.is_dir())
+        self.assertIn("Ship the thing", self.sw("goal", "list"))
+        start = json.loads((run / "log.jsonl").read_text().splitlines()[0])
+        self.assertEqual(start["goal"], "1")
+
+    def test_new_with_a_goal_id_keeps_binding_by_id(self):
+        self.sw("goal", "add", "Existing")
+        run = pathlib.Path(self.sw("run", "new", "ship", "--goal", "1", cwd=self.work).strip())
+        start = json.loads((run / "log.jsonl").read_text().splitlines()[0])
+        self.assertEqual(start["goal"], "1")
+        self.assertEqual(self.sw("goal", "list").count("Existing"), 1)
+
+    def test_new_with_an_unknown_goal_id_is_refused(self):
+        with self.assertRaises(Failed):
+            self.sw("run", "new", "ship", "--goal", "42", cwd=self.work)
+
+    def test_new_with_plan_and_freeze_writes_both(self):
+        run = pathlib.Path(self.sw("run", "new", "ship", "--goal", "G", "--plan", str(self.plan), "--freeze", "tests/t.sh", cwd=self.work).strip())
+        self.assertEqual((run / "plan.md").read_text(), self.plan.read_text())
+        events = [json.loads(l) for l in (run / "log.jsonl").read_text().splitlines() if l.strip()]
+        self.assertTrue(any(e.get("event") == "freeze" for e in events))
+        (self.work / "tests" / "t.sh").write_text("exit 0 # changed\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("tampered", str(cm.exception))
+
+    def test_new_with_plan_from_stdin(self):
+        r = subprocess.run([SW, "run", "new", "ship", "--plan", "-"], input=self.plan.read_text(), env=self.env, capture_output=True, text=True, cwd=self.work)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((pathlib.Path(r.stdout.strip()) / "plan.md").read_text(), self.plan.read_text())
+
+    def test_new_refuses_a_plan_without_a_checked_step(self):
+        bad = self.work / "bad.txt"
+        bad.write_text("# Goal: g\n- do things\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "new", "ship", "--plan", str(bad), cwd=self.work)
+        self.assertIn("check:", str(cm.exception))
+
+    def test_prove_checks_and_certifies_in_one_call(self):
+        self.sw("run", "new", "ship", "--plan", str(self.plan), "--freeze", "tests/t.sh", cwd=self.work)
+        out = self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.assertIn("check passed", out)
+        self.assertIn("certified", out)
+
+    def test_prove_stops_at_a_failing_check(self):
+        (self.work / "tests" / "t.sh").write_text("exit 1\n")
+        run = pathlib.Path(self.sw("run", "new", "ship", "--plan", str(self.plan), cwd=self.work).strip())
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.assertIn("check failed", str(cm.exception))
+        events = [json.loads(l) for l in (run / "log.jsonl").read_text().splitlines() if l.strip()]
+        self.assertTrue(any(e.get("event") == "receipt" and e.get("ok") is False for e in events))
+        self.assertFalse(any(e.get("certified") for e in events))
+
+    def test_prove_carries_the_review_requirement(self):
+        (self.work / "mod.py").write_text("X = 1\n")
+        (self.work / "tests" / "test_x.py").write_text("import unittest\nfrom mod import X\nclass T(unittest.TestCase):\n    def test_x(self):\n        self.assertEqual(X, 2)\n")
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ python3 -m unittest discover -s tests\nOutward: none\n")
+        self.sw("run", "new", "ship", "--plan", str(self.plan), cwd=self.work)
+        (self.work / "mod.py").write_text("X = 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+    def test_finish_closes_the_goal_and_adds_a_notify_card(self):
+        self.sw("run", "new", "ship", "--goal", "Ship it", "--plan", str(self.plan), cwd=self.work)
+        self.sw("run", "prove", "latest", "1", cwd=self.work)
+        out = self.sw("run", "finish", "latest", "Shipped: tests pass (1 passed).", cwd=self.work)
+        self.assertIn("notify", out)
+        self.assertIn("(done)", self.sw("goal", "list", "--all"))
+        self.assertIn("Shipped", self.sw("inbox", "list"))
+
+    def test_finish_refuses_while_a_step_is_unproven(self):
+        self.sw("run", "new", "ship", "--goal", "Ship it", "--plan", str(self.plan), cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "finish", "latest", "done", cwd=self.work)
+        self.assertIn("step 1", str(cm.exception))
+        self.assertNotIn("(done)", self.sw("goal", "list", "--all"))
+
+
+class SessionBaselineTests(SwTestCase):
+    """Changes made before `sw run new` are still changes: the session-start baseline (written by
+    the SessionStart hook through `sw run brief`, or by `sw run baseline`) is the manifest a run
+    compares against. Probe 2026-11-06: an agent edited first, opened the run second, and the
+    review requirement never fired."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        (self.work / "tests").mkdir(parents=True)
+        (self.work / "mod.py").write_text("X = 1\n")
+        (self.work / "tests" / "test_x.py").write_text("import unittest\nfrom mod import X\nclass T(unittest.TestCase):\n    def test_x(self):\n        self.assertEqual(X, 2)\n")
+        self.plan = self.work / "plan.txt"
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ python3 -m unittest discover -s tests\nOutward: none\n")
+
+    def test_baseline_command_then_edit_then_open_still_requires_the_review(self):
+        self.sw("run", "baseline", cwd=self.work)
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "new", "ship", "--plan", str(self.plan), cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+        self.assertIn("mod.py", str(cm.exception))
+
+    def test_brief_with_a_session_start_event_writes_the_baseline(self):
+        event = json.dumps({"session_id": "s1", "cwd": str(self.work), "hook_event_name": "SessionStart", "source": "startup"})
+        r = subprocess.run([SW, "run", "brief", "--hook"], input=event, env=self.env, capture_output=True, text=True, cwd=self.work)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "new", "ship", "--plan", str(self.plan), cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+    def test_without_a_baseline_the_start_manifest_is_used(self):
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "new", "ship", "--plan", str(self.plan), cwd=self.work)
+        self.assertIn("certified", self.sw("run", "prove", "latest", "1", cwd=self.work))
+
+    def test_a_stale_baseline_is_ignored(self):
+        self.sw("run", "baseline", cwd=self.work)
+        base = next((self.home / "baselines").glob("*.json"))
+        data = json.loads(base.read_text())
+        data["ts"] = "2020-01-01T00:00:00"
+        base.write_text(json.dumps(data))
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "new", "ship", "--plan", str(self.plan), cwd=self.work)
+        self.assertIn("certified", self.sw("run", "prove", "latest", "1", cwd=self.work))
+
+
+class BriefNeverBlocksTests(SwTestCase):
+    def test_brief_without_hook_does_not_read_a_silent_stdin(self):
+        r, w = os.pipe()
+        try:
+            p = subprocess.Popen([SW, "run", "brief"], stdin=r, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            out, err = p.communicate(timeout=10)
+        finally:
+            os.close(r); os.close(w)
+        self.assertEqual(p.returncode, 0, err)
+
+
+class VerdictShapeTests(SwTestCase):
+    """A review verdict on a code step must say PASS or FAIL first and name every changed source
+    file, so a reviewer who never looked at a file cannot pass it by silence."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        (self.work / "tests").mkdir(parents=True)
+        (self.work / "mod.py").write_text("X = 1\n")
+        (self.work / "util.py").write_text("Y = 1\n")
+        (self.work / "tests" / "test_x.py").write_text("import unittest\nfrom mod import X\nclass T(unittest.TestCase):\n    def test_x(self):\n        self.assertEqual(X, 2)\n")
+        self.run = pathlib.Path(self.sw("run", "new", "v", cwd=self.work).strip())
+        (self.run / "plan.md").write_text("# Goal: g\nMust not: x\n1. a | check: $ python3 -m unittest discover -s tests\nOutward: none\n")
+        (self.work / "mod.py").write_text("X = 2\n")
+        (self.work / "util.py").write_text("Y = 2\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.verdict = self.run / "checks" / "step-1-review.md"
+        self.verdict.parent.mkdir(exist_ok=True)
+
+    def log(self):
+        return self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={self.verdict}", cwd=self.work)
+
+    def test_verdict_must_start_with_pass_or_fail(self):
+        self.verdict.write_text("Looks fine to me. mod.py util.py\n")
+        with self.assertRaises(Failed) as cm:
+            self.log()
+        self.assertIn("PASS or FAIL", str(cm.exception))
+
+    def test_verdict_must_name_every_changed_source_file(self):
+        self.verdict.write_text("PASS: mod.py rounds correctly\n")
+        with self.assertRaises(Failed) as cm:
+            self.log()
+        self.assertIn("util.py", str(cm.exception))
+
+    def test_a_complete_verdict_is_accepted(self):
+        self.verdict.write_text("PASS\n- mod.py: X documented as 2, now 2\n- util.py: Y bumped, nothing documented\n")
+        self.assertIn("review verdict recorded", self.log())
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_packet_asks_the_contract_question_per_file_first(self):
+        out = self.sw("run", "review", "latest", "1", cwd=self.work)
+        self.assertLess(out.index("document"), out.index("Latest check output"))
+        self.assertIn("mod.py", out)
+        self.assertIn("util.py", out)
+
+
+class SourceFileClassificationTests(SwTestCase):
+    """Logs, transcripts, caches and dot-folders are not source: they change during any run and a
+    reviewer has nothing to judge in them (probe 2026-11-06: the harness's stream.jsonl had to be
+    named in every verdict)."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        (self.work / "tests").mkdir(parents=True)
+        (self.work / "tests" / "test_x.py").write_text("import unittest\nclass T(unittest.TestCase):\n    def test_x(self):\n        pass\n")
+        run = pathlib.Path(self.sw("run", "new", "cls", cwd=self.work).strip())
+        (run / "plan.md").write_text("# Goal: g\nMust not: x\n1. a | check: $ python3 -m unittest discover -s tests\nOutward: none\n")
+
+    def test_logs_transcripts_and_dot_folders_do_not_require_a_review(self):
+        (self.work / "stream.jsonl").write_text('{"type":"assistant"}\n')
+        (self.work / "run.log").write_text("noise\n")
+        (self.work / "notes.tmp").write_text("x\n")
+        (self.work / ".claude").mkdir()
+        (self.work / ".claude" / "settings.json").write_text("{}\n")
+        self.assertIn("certified", self.sw("run", "prove", "latest", "1", cwd=self.work))
+
+    def test_a_real_source_file_still_does(self):
+        (self.work / "stream.jsonl").write_text('{"type":"assistant"}\n')
+        (self.work / "mod.py").write_text("X = 1\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.assertIn("mod.py", str(cm.exception))
+        self.assertNotIn("stream.jsonl", str(cm.exception))
+
+
+
+class ReviewRoundTwoTests(SwTestCase):
+    """Holes the second adversarial review reproduced against the 0.3 binary."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        (self.work / "tests").mkdir(parents=True)
+        (self.work / "mod.py").write_text("X = 1\n")
+        (self.work / "tests" / "test_x.py").write_text("import unittest\nfrom mod import X\nclass T(unittest.TestCase):\n    def test_x(self):\n        self.assertEqual(X, 2)\n")
+        self.plan = self.work / "plan.txt"
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ python3 -m unittest discover -s tests\nOutward: none\n")
+
+    def open(self):
+        return pathlib.Path(self.sw("run", "new", "r2", "--plan", str(self.plan), cwd=self.work).strip())
+
+    def verdict_for(self, run, text="PASS: mod.py now 2 as the test documents\n"):
+        v = run / "checks" / "step-1-review.md"
+        v.parent.mkdir(exist_ok=True)
+        v.write_text(text)
+        return v
+
+    def test_a_file_the_host_writes_between_calls_does_not_stale_the_receipt(self):
+        run = self.open()
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.work / "stream.jsonl").write_text('{"turn":1}\n')
+        (self.work / "stderr.txt").write_text("")
+        v = self.verdict_for(run)
+        self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={v}", cwd=self.work)
+        (self.work / "stream.jsonl").write_text('{"turn":1}\n{"turn":2}\n')
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_a_verdict_logged_before_the_latest_receipt_is_stale(self):
+        run = self.open()
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        v = self.verdict_for(run)
+        self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={v}", cwd=self.work)
+        (self.work / "mod.py").write_text("X = 2  # changed after the verdict\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+    def test_outside_git_the_hash_covers_the_run_folder_from_a_subfolder(self):
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        self.open()
+        sub = self.work / "sub"
+        sub.mkdir()
+        self.sw("run", "check", "latest", "1", cwd=sub)
+        (self.work / "mod.py").write_text("X = 2  # edited above the subfolder\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=sub)
+        self.assertIn("stale receipt", str(cm.exception))
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "needs an unreadable folder")
+    def test_an_unreadable_subfolder_does_not_break_run_new(self):
+        locked = self.work / "data"
+        locked.mkdir()
+        (locked / "secret").write_text("x\n")
+        locked.chmod(0o000)
+        try:
+            run = self.open()
+            self.assertTrue(run.is_dir())
+            (self.work / "mod.py").write_text("X = 2\n")
+            with self.assertRaises(Failed) as cm:
+                self.sw("run", "prove", "latest", "1", cwd=self.work)
+            self.assertIn("review", str(cm.exception))
+        finally:
+            locked.chmod(0o755)
+
+    def test_a_missing_start_manifest_is_tamper_not_a_free_pass(self):
+        run = self.open()
+        (run / "files-start.json").unlink()
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("manifest", str(cm.exception))
+
+    def test_a_bad_plan_leaves_no_goal_behind(self):
+        bad = self.work / "bad.txt"
+        bad.write_text("# Goal: g\n- no steps\n")
+        with self.assertRaises(Failed):
+            self.sw("run", "new", "r2", "--goal", "Fix the thing", "--plan", str(bad), cwd=self.work)
+        self.assertNotIn("Fix the thing", self.sw("goal", "list"))
+        self.assertEqual(self.sw("run", "list").strip(), "")
+
+    def test_latest_prefers_the_run_opened_in_this_folder(self):
+        other = pathlib.Path(self.tmp.name) / "other"
+        other.mkdir()
+        here = self.open()
+        self.sw("run", "new", "elsewhere", "--goal", "Other project", cwd=other)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "finish", "latest", "done", cwd=self.work)
+        self.assertIn(here.name, str(cm.exception))
+        self.assertNotIn("(done)", self.sw("goal", "list", "--all"))
+
+    def test_finish_twice_is_refused(self):
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        self.sw("run", "new", "r2", "--goal", "G", "--plan", str(self.plan), cwd=self.work)
+        self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.sw("run", "finish", "latest", "done", cwd=self.work)
+        with self.assertRaises(Failed):
+            self.sw("run", "finish", "latest", "done again", cwd=self.work)
+        self.assertEqual(self.sw("inbox", "list").count("notify"), 1)
+
+    def test_resume_does_not_rewrite_the_baseline(self):
+        self.sw("run", "baseline", cwd=self.work)
+        (self.work / "mod.py").write_text("X = 2\n")
+        event = json.dumps({"session_id": "s1", "cwd": str(self.work), "hook_event_name": "SessionStart", "source": "resume"})
+        r = subprocess.run([SW, "run", "brief", "--hook"], input=event, env=self.env, capture_output=True, text=True, cwd=self.work)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.open()
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+    def test_a_later_step_compares_against_the_last_certified_state(self):
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ python3 -m unittest discover -s tests\n2. b | check: $ true | after: 1\nOutward: none\n")
+        run = self.open()
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        v = self.verdict_for(run)
+        self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={v}", cwd=self.work)
+        self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("certified", self.sw("run", "prove", "latest", "2", cwd=self.work))
+
+    def test_ci_config_under_a_dot_folder_counts_as_source(self):
+        (self.work / ".github" / "workflows").mkdir(parents=True)
+        self.open()
+        (self.work / ".github" / "workflows" / "ci.yml").write_text("on: push\n")
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("ci.yml", str(cm.exception))
+
+    def test_review_key_cannot_be_logged_by_hand(self):
+        self.open()
+        with self.assertRaises(Failed):
+            self.sw("run", "log", "latest", "step=1", "review=pass", cwd=self.work)
+
+
+class ReviewRoundThreeTests(SwTestCase):
+    """Holes the third adversarial review reproduced."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        (self.work / "tests").mkdir(parents=True)
+        (self.work / "app.py").write_text("def f():\n    return 1\n")
+        (self.work / "tests" / "test_app.py").write_text("import unittest\nfrom app import f\nclass T(unittest.TestCase):\n    def test_f(self):\n        self.assertEqual(f(), 2)\n")
+        self.plan = self.work / "plan.txt"
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ python3 -m unittest discover -s tests\nOutward: none\n")
+        self.git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+
+    def open(self, plan=None, cwd=None):
+        return pathlib.Path(self.sw("run", "new", "r3", "--plan", str(plan or self.plan), cwd=cwd or self.work).strip())
+
+    def verdict(self, run, text):
+        v = run / "checks" / "step-1-review.md"
+        v.parent.mkdir(exist_ok=True)
+        v.write_text(text)
+        return v
+
+    def test_check_from_a_sibling_folder_is_refused(self):
+        self.open()
+        outside = pathlib.Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "check", "latest", "1", cwd=outside)
+        self.assertIn("opened in", str(cm.exception))
+
+    def test_a_verdict_given_on_another_tree_than_the_receipt_is_refused(self):
+        run = self.open()
+        (self.work / "app.py").write_text("def f():\n    return 2  # hack\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.work / "app.py").write_text("def f():\n    return 2  # honest\n")
+        v = self.verdict(run, "PASS: app.py honest; tests/test_app.py fine\n")
+        self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={v}", cwd=self.work)
+        (self.work / "app.py").write_text("def f():\n    return 2  # hack\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+    def test_baseline_command_does_not_overwrite_a_fresh_baseline(self):
+        self.sw("run", "baseline", cwd=self.work)
+        (self.work / "app.py").write_text("def f():\n    return 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "baseline", cwd=self.work)
+        self.assertIn("already", str(cm.exception))
+        self.open()
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+    def test_a_prose_check_with_a_code_change_needs_the_shaped_verdict_too(self):
+        self.plan.write_text("# Goal: g\nMust not: x\n1. fix f | check: the tests pass\nOutward: none\n")
+        run = self.open()
+        (self.work / "app.py").write_text("def f():\n    return 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "log", "latest", "step=1", "result=pass", self.evidence(), cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+        v = self.verdict(run, "PASS: app.py returns 2 as documented\n")
+        self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={v}", cwd=self.work)
+        self.assertIn("1/1", self.sw("run", "status", cwd=self.work))
+
+    def test_a_build_folder_inside_src_is_source_and_a_tests_log_fixture_is_bound(self):
+        (self.work / "src" / "build").mkdir(parents=True)
+        (self.work / "src" / "build" / "gen.py").write_text("G = 1\n")
+        (self.work / "tests" / "fixtures").mkdir()
+        (self.work / "tests" / "fixtures" / "sample.log").write_text("a\n")
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        self.open()
+        (self.work / "src" / "build" / "gen.py").write_text("G = 2\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("gen.py", str(cm.exception))
+        (self.work / "tests" / "fixtures" / "sample.log").write_text("b\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.work / "tests" / "fixtures" / "sample.log").write_text("c\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("stale", str(cm.exception))
+
+    def test_data_env_and_template_files_need_review_but_docs_do_not(self):
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        self.open()
+        for name in ("rate.txt", ".env", "page.j2", "Procfile", "run"):
+            (self.work / name).write_text("v=1\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        for name in ("rate.txt", ".env", "page.j2", "Procfile"):
+            self.assertIn(name, str(cm.exception))
+        docs = self.open()
+        (self.work / "README.md").write_text("notes\n")
+        (self.work / "docs").mkdir()
+        (self.work / "docs" / "guide.txt").write_text("notes\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_inside_git_a_run_in_a_subfolder_reviews_the_whole_repository(self):
+        repo = pathlib.Path(self.tmp.name) / "repo"
+        (repo / "sub").mkdir(parents=True)
+        (repo / "lib").mkdir()
+        (repo / "lib" / "core.py").write_text("C = 1\n")
+        (repo / "sub" / "x.py").write_text("X = 1\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=repo, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "base"], cwd=repo, check=True)
+        plan = repo / "plan.txt"
+        plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        self.open(plan=plan, cwd=repo / "sub")
+        (repo / "lib" / "core.py").write_text("C = 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=repo / "sub")
+        self.assertIn("core.py", str(cm.exception))
+
+    def test_packet_lists_tests_too_and_a_name_at_a_sentence_end_counts(self):
+        run = self.open()
+        (self.work / "app.py").write_text("def f():\n    return 2\n")
+        (self.work / "tests" / "test_more.py").write_text("import unittest\nclass U(unittest.TestCase):\n    def test_u(self):\n        pass\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        packet = self.sw("run", "review", "latest", "1", cwd=self.work)
+        self.assertIn("test_more.py", packet)
+        v = self.verdict(run, "PASS\nI checked app.py. I also read test_more.py.\n")
+        self.assertIn("review verdict recorded", self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={v}", cwd=self.work))
+
+    def test_inside_git_host_noise_does_not_stale_the_receipt(self):
+        subprocess.run([*self.git, "init", "-q"], cwd=self.work, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=self.work, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "base"], cwd=self.work, check=True)
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        self.open()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.work / ".claude").mkdir()
+        (self.work / ".claude" / "settings.local.json").write_text("{}\n")
+        (self.work / "session.log").write_text("x\n")
+        (self.work / "stream.jsonl").write_text("{}\n")
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_state_folder_inside_a_git_repo_is_not_under_review(self):
+        subprocess.run([*self.git, "init", "-q"], cwd=self.work, check=True)
+        env = {**self.env, "STILLWRIGHT_HOME": str(self.work / "swstate")}
+        def sw(*argv):
+            r = subprocess.run([SW, *argv], env=env, capture_output=True, text=True, cwd=self.work)
+            if r.returncode != 0:
+                raise Failed(r.stderr.strip())
+            return r.stdout
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\n2. b | check: $ true | after: 1\nOutward: none\n")
+        sw("run", "new", "inside", "--plan", str(self.plan))
+        self.assertIn("certified", sw("run", "prove", "latest", "1"))
+        self.assertIn("certified", sw("run", "prove", "latest", "2"))
+
+
+class ReviewRoundFourTests(SwTestCase):
+    """One classifier for the receipt and the review: what the review covers is what the hash binds."""
+
+    def setUp(self):
+        super().setUp()
+        self.git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+        self.repo = pathlib.Path(self.tmp.name) / "repo"
+        (self.repo / "tests" / "fixtures").mkdir(parents=True)
+        (self.repo / "core.py").write_text("C = 1\n")
+        (self.repo / "tests" / "fixtures" / "golden.log").write_text("expected-a\n")
+        (self.repo / "tests" / "test_c.py").write_text("import unittest\nclass T(unittest.TestCase):\n    def test_c(self):\n        pass\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "base"], cwd=self.repo, check=True)
+        self.plan = pathlib.Path(self.tmp.name) / "plan.txt"
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+
+    def open(self, cwd=None):
+        return pathlib.Path(self.sw("run", "new", "r4", "--plan", str(self.plan), cwd=cwd or self.repo).strip())
+
+    def test_a_tracked_fixture_log_is_bound_by_the_receipt_in_git(self):
+        self.open()
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        (self.repo / "tests" / "fixtures" / "golden.log").write_text("BROKEN\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.repo)
+        self.assertIn("stale", str(cm.exception))
+
+    def test_a_tracked_data_jsonl_is_bound_and_reviewed_in_git(self):
+        (self.repo / "data").mkdir()
+        (self.repo / "data" / "rows.jsonl").write_text("{}\n")
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "data"], cwd=self.repo, check=True)
+        self.open()
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        (self.repo / "data" / "rows.jsonl").write_text('{"x":1}\n')
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.repo)
+        self.assertIn("stale", str(cm.exception))
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.repo)
+        self.assertIn("rows.jsonl", str(cm.exception))
+
+    def test_check_from_another_git_repository_is_refused(self):
+        self.open()
+        other = pathlib.Path(self.tmp.name) / "other"
+        other.mkdir()
+        subprocess.run([*self.git, "init", "-q"], cwd=other, check=True)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "check", "latest", "1", cwd=other)
+        self.assertIn("opened in", str(cm.exception))
+
+    def test_a_gitignored_state_folder_inside_the_repo_does_not_break_check(self):
+        (self.repo / ".gitignore").write_text(".sw/\n")
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "ignore"], cwd=self.repo, check=True)
+        env = {**self.env, "STILLWRIGHT_HOME": str(self.repo / ".sw")}
+        def sw(*argv):
+            r = subprocess.run([SW, *argv], env=env, capture_output=True, text=True, cwd=self.repo)
+            if r.returncode != 0:
+                raise Failed(r.stderr.strip())
+            return r.stdout
+        sw("run", "new", "inside", "--plan", str(self.plan))
+        self.assertIn("certified", sw("run", "prove", "latest", "1"))
+
+    def test_a_forged_startup_event_does_not_reset_a_fresh_baseline(self):
+        self.sw("run", "baseline", cwd=self.repo)
+        (self.repo / "core.py").write_text("C = 2\n")
+        event = json.dumps({"session_id": "x", "cwd": str(self.repo), "hook_event_name": "SessionStart", "source": "startup"})
+        r = subprocess.run([SW, "run", "brief", "--hook"], input=event, env=self.env, capture_output=True, text=True, cwd=self.repo)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.open()
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.repo)
+        self.assertIn("core.py", str(cm.exception))
+
+    def test_tracked_code_under_a_top_level_build_folder_is_reviewed_in_git(self):
+        (self.repo / "build").mkdir()
+        (self.repo / "build" / "webpack.base.conf.js").write_text("module.exports = {}\n")
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "build cfg"], cwd=self.repo, check=True)
+        self.open()
+        (self.repo / "build" / "webpack.base.conf.js").write_text("module.exports = {mode: 'x'}\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.repo)
+        self.assertIn("webpack.base.conf.js", str(cm.exception))
+
+    def test_snapshot_and_rewind_still_work_on_the_run_repository(self):
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\n2. b | check: $ true | after: 1\nOutward: none\n")
+        self.open()
+        self.sw("run", "snapshot", "latest", "1", cwd=self.repo)
+        (self.repo / "core.py").write_text("C = 9\n")
+        self.sw("run", "rewind", "latest", "1", cwd=self.repo)
+        self.assertEqual((self.repo / "core.py").read_text(), "C = 1\n")
+
+
+
+class ReviewRoundFiveTests(SwTestCase):
+    """A snapshot cannot launder pending changes; what the receipt binds is what the review lists."""
+
+    def setUp(self):
+        super().setUp()
+        self.git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+        self.repo = pathlib.Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        (self.repo / "core.py").write_text("C = 1\n")
+        (self.repo / ".claude").mkdir()
+        (self.repo / ".claude" / "settings.json").write_text("{}\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "base"], cwd=self.repo, check=True)
+        self.plan = pathlib.Path(self.tmp.name) / "plan.txt"
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\n2. b | check: $ true | after: 1\nOutward: none\n")
+        self.run = pathlib.Path(self.sw("run", "new", "r5", "--plan", str(self.plan), cwd=self.repo).strip())
+
+    def test_a_snapshot_after_the_work_does_not_remove_it_from_the_review(self):
+        (self.repo / "core.py").write_text("C = 2\n")
+        with self.assertRaises(Failed):
+            self.sw("run", "prove", "latest", "1", cwd=self.repo)
+        self.sw("run", "snapshot", "latest", "1", cwd=self.repo)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.repo)
+        self.assertIn("core.py", str(cm.exception))
+
+    def test_a_logged_fail_is_not_overridden_by_a_snapshot_and_a_new_check(self):
+        (self.repo / "core.py").write_text("C = 2\n")
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        v = self.run / "checks" / "step-1-review.md"
+        v.parent.mkdir(exist_ok=True)
+        v.write_text("FAIL: core.py breaks what it documents\n")
+        self.sw("run", "log", "latest", "step=1", "result=fail", f"evidence={v}", cwd=self.repo)
+        self.sw("run", "snapshot", "latest", "1", cwd=self.repo)
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.repo)
+        self.assertIn("reviewer", str(cm.exception))
+
+    def test_a_tracked_host_settings_file_is_reviewed(self):
+        (self.repo / ".claude" / "settings.json").write_text('{"hooks": {}}\n')
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.repo)
+        self.assertIn("settings.json", str(cm.exception))
+
+    def test_a_submodule_s_files_are_bound(self):
+        sub = pathlib.Path(self.tmp.name) / "subsrc"
+        sub.mkdir()
+        (sub / "s.py").write_text("S = 1\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=sub, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=sub, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "s"], cwd=sub, check=True)
+        subprocess.run([*self.git, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "sub"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "add sub"], cwd=self.repo, check=True)
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        (self.repo / "sub" / "s.py").write_text("S = 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.repo)
+        self.assertIn("stale", str(cm.exception))
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_outside_git_a_symlinked_source_file_is_bound(self):
+        work = pathlib.Path(self.tmp.name) / "work"
+        work.mkdir()
+        target = pathlib.Path(self.tmp.name) / "real.py"
+        target.write_text("R = 1\n")
+        (work / "linked.py").symlink_to(target)
+        plan = pathlib.Path(self.tmp.name) / "p2.txt"
+        plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        self.sw("run", "new", "sym", "--plan", str(plan), cwd=work)
+        self.sw("run", "check", "latest", "1", cwd=work)
+        target.write_text("R = 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=work)
+        self.assertIn("stale", str(cm.exception))
+
+
+class ReviewRoundSixTests(SwTestCase):
+    def setUp(self):
+        super().setUp()
+        self.git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+        self.repo = pathlib.Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        (self.repo / "core.py").write_text("def ok():\n    return True\n")
+        (self.repo / "other.py").write_text("O = 1\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "base"], cwd=self.repo, check=True)
+        self.plan = pathlib.Path(self.tmp.name) / "plan.txt"
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\n2. b | check: $ true | after: 1\nOutward: none\n")
+
+    def open(self, plan=None):
+        return pathlib.Path(self.sw("run", "new", "r6", "--plan", str(plan or self.plan), cwd=self.repo).strip())
+
+    def test_a_late_snapshot_does_not_hide_the_diff_from_the_packet(self):
+        self.open()
+        (self.repo / "core.py").write_text("def ok():\n    return False\n")
+        self.sw("run", "snapshot", "latest", "1", cwd=self.repo)
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        out = self.sw("run", "review", "latest", "1", cwd=self.repo)
+        self.assertIn("-    return True", out)
+        self.assertIn("+    return False", out)
+
+    def test_an_untracked_nested_repository_is_bound(self):
+        nested = self.repo / "vendor" / "lib"
+        nested.mkdir(parents=True)
+        (nested / "v.py").write_text("V = 1\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=nested, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=nested, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "v"], cwd=nested, check=True)
+        self.open()
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        (nested / "v.py").write_text("V = 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.repo)
+        self.assertIn("stale", str(cm.exception))
+
+    def test_tracked_files_inside_a_submodule_are_bound_whatever_their_folder(self):
+        sub = pathlib.Path(self.tmp.name) / "subsrc"
+        (sub / "build").mkdir(parents=True)
+        (sub / "build" / "conf.js").write_text("x = 1\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=sub, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=sub, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "s"], cwd=sub, check=True)
+        subprocess.run([*self.git, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "sub"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "add sub"], cwd=self.repo, check=True)
+        self.open()
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        (self.repo / "sub" / "build" / "conf.js").write_text("x = 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.repo)
+        self.assertIn("stale", str(cm.exception))
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_a_tracked_symlink_to_a_folder_is_not_walked(self):
+        outside = pathlib.Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        (outside / "locked.txt").write_text("x\n")
+        (self.repo / "link").symlink_to(outside)
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "link"], cwd=self.repo, check=True)
+        (outside / "locked.txt").chmod(0)
+        try:
+            self.open()
+            self.assertIn("check passed", self.sw("run", "check", "latest", "1", cwd=self.repo))
+        finally:
+            (outside / "locked.txt").chmod(0o644)
+
+    def test_parallel_steps_each_answer_for_their_own_changes(self):
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\n2. b | check: $ true\nOutward: none\n")
+        run = self.open()
+        (self.repo / "core.py").write_text("def ok():\n    return False\n")
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        self.sw("run", "check", "latest", "2", cwd=self.repo)
+        v2 = run / "checks" / "step-2-review.md"
+        v2.parent.mkdir(exist_ok=True)
+        v2.write_text("PASS: core.py reviewed as step 2's work\n")
+        self.sw("run", "log", "latest", "step=2", "result=pass", f"evidence={v2}", cwd=self.repo)
+        self.assertIn("certified", self.sw("run", "done", "latest", "2", cwd=self.repo))
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.repo)
+        self.assertIn("core.py", str(cm.exception))
+
+
+class ReviewRoundSevenTests(SwTestCase):
+    def setUp(self):
+        super().setUp()
+        self.git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+        self.repo = pathlib.Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        (self.repo / "core.py").write_text("def ok():\n    return True\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "base"], cwd=self.repo, check=True)
+        self.plan = pathlib.Path(self.tmp.name) / "plan.txt"
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\n2. b | check: $ true\nOutward: none\n")
+
+    def open(self):
+        return pathlib.Path(self.sw("run", "new", "r7", "--plan", str(self.plan), cwd=self.repo).strip())
+
+    def add_submodule(self):
+        sub = pathlib.Path(self.tmp.name) / "subsrc"
+        sub.mkdir()
+        (sub / "s.py").write_text("S = 1\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=sub, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=sub, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "s"], cwd=sub, check=True)
+        subprocess.run([*self.git, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "sub"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "add sub"], cwd=self.repo, check=True)
+
+    def test_a_new_untracked_file_inside_a_submodule_is_bound_and_reviewed(self):
+        self.add_submodule()
+        self.open()
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        (self.repo / "sub" / "helper.py").write_text("H = 1\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.repo)
+        self.assertIn("stale", str(cm.exception))
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.repo)
+        self.assertIn("helper.py", str(cm.exception))
+
+    def test_packet_diff_of_a_parallel_step_is_not_emptied_by_a_sibling_certificate(self):
+        run = self.open()
+        (self.repo / "core.py").write_text("def ok():\n    return False\n")
+        self.sw("run", "check", "latest", "2", cwd=self.repo)
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        v1 = run / "checks" / "step-1-review.md"
+        v1.parent.mkdir(exist_ok=True)
+        v1.write_text("PASS: core.py judged as step 1's work\n")
+        self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={v1}", cwd=self.repo)
+        self.sw("run", "done", "latest", "1", cwd=self.repo)
+        out = self.sw("run", "review", "latest", "2", cwd=self.repo)
+        self.assertIn("+    return False", out)
+
+    def test_packet_diff_survives_a_commit_by_the_worker(self):
+        self.open()
+        (self.repo / "core.py").write_text("def ok():\n    return False\n")
+        subprocess.run([*self.git, "commit", "-q", "-am", "work"], cwd=self.repo, check=True)
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        out = self.sw("run", "review", "latest", "1", cwd=self.repo)
+        self.assertIn("+    return False", out)
+
+    def test_a_nested_repository_s_own_build_folder_is_bound(self):
+        nested = self.repo / "vendor" / "lib"
+        (nested / "build").mkdir(parents=True)
+        (nested / "build" / "webpack.conf.js").write_text("x = 1\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=nested, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=nested, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "n"], cwd=nested, check=True)
+        self.open()
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        (nested / "build" / "webpack.conf.js").write_text("x = 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.repo)
+        self.assertIn("stale", str(cm.exception))
+
+    def test_a_nested_repository_without_a_commit_does_not_block_done(self):
+        nested = self.repo / "vendor" / "fresh"
+        nested.mkdir(parents=True)
+        (nested / "f.py").write_text("F = 1\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=nested, check=True)
+        self.open()
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.repo))
+
+
+class ReviewRoundEightTests(SwTestCase):
+    def setUp(self):
+        super().setUp()
+        self.git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+        self.repo = pathlib.Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        (self.repo / "core.py").write_text("def ok():\n    return True\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "base"], cwd=self.repo, check=True)
+        self.plan = pathlib.Path(self.tmp.name) / "plan.txt"
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+
+    def test_the_packet_diff_starts_at_the_session_baseline(self):
+        self.sw("run", "baseline", cwd=self.repo)
+        (self.repo / "core.py").write_text("def ok():\n    return False\n")
+        self.sw("run", "new", "r8", "--plan", str(self.plan), cwd=self.repo)
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        out = self.sw("run", "review", "latest", "1", cwd=self.repo)
+        self.assertIn("core.py", out)
+        self.assertIn("-    return True", out)
+        self.assertIn("+    return False", out)
+
+    def test_a_removed_file_since_the_baseline_shows_in_the_diff(self):
+        (self.repo / "old.py").write_text("OLD = 1\n")
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "old"], cwd=self.repo, check=True)
+        self.sw("run", "baseline", cwd=self.repo)
+        (self.repo / "old.py").unlink()
+        self.sw("run", "new", "r8", "--plan", str(self.plan), cwd=self.repo)
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        out = self.sw("run", "review", "latest", "1", cwd=self.repo)
+        self.assertIn("old.py (removed)", out)
+        self.assertIn("-OLD = 1", out)

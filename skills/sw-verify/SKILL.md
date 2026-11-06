@@ -4,7 +4,7 @@ description: Independent proof that a step is really done. Runs the step's agree
 license: MIT
 metadata:
   author: Hamza Ilyas
-  version: "0.2.2"
+  version: "0.3.0"
 ---
 
 # Verify
@@ -27,9 +27,23 @@ claim nobody checked. The worker's own report is evidence to check, never the ve
 
 ## When a reviewer is needed at all
 
-A command that exits 0 is the cheapest and most honest verdict there is. Use a model reviewer
-only for work no command can judge (prose, research, design), and run it on the small model
-in a fresh context: it reads the output and the check, nothing else, so it costs cents.
+A command that exits 0 is the cheapest and most honest verdict there is, and for most steps it
+is the whole verdict. Two cases need a model reviewer, always a fresh read-only subagent on the
+small model that sees the packet and nothing else, so it costs cents:
+
+- **A code step.** When any file but documents or media changed since the run started (or since
+  the step certified before this one started), `sw run done` and `sw run prove` refuse to certify until the reviewer's
+  verdict is logged, whatever the check command was. A passing check proves the test, not the
+  contract: the reviewer reads the changed files against what they
+  document (docstrings, comments, README) and fails the step when a documented behaviour is
+  left broken or unimplemented, or when the reported symptom's cause is still there. FAIL means one
+  of two things: a documented behaviour broken or unimplemented, or the reported symptom still there
+  in the ticket's own scenario. Anything else the reviewer would improve (float rounding at a
+  boundary, an input type nobody documented, a limit nobody set, style) is a note under the PASS,
+  never a FAIL: the reviewer judges the contract, not what it would have added. This is
+  the case the 2026-11-06 measurement found: an agent fixes the ticket, passes the visible
+  test, and leaves the documented second defect unmentioned.
+- **Work no command can judge** (prose, research, design): the verdict is the pass.
 
 ## Kinds of checks
 
@@ -46,16 +60,21 @@ in a fresh context: it reads the output and the check, nothing else, so it costs
 
 When a command can't decide it, run `sw run review latest N` and give the reviewer that
 packet and nothing else: it holds the goal, the must-nots, the step and its check, the diff
-since the last snapshot (new files included) and the latest check output, and it leaves out
+since the step's review base (its snapshot, the step certified before it started, or the run's start; new files included) and the latest check output, and it leaves out
 what the worker said. The packet ends with the brief ("Start from FAIL. Pass only what the
 changes and the output prove; list each requirement of the check as pass or fail with the
 evidence") and
 the path the verdict goes to (`<run>/checks/step-N-review.md`). Give the reviewer read-only
-tools; it may open files the packet names, never the run log.
+tools; it may open files the packet names, never the run log. For a code step the packet also
+lists the source files changed since the run started, with their content when short, and
+asks the contract question; the reviewer answers it file by file.
 
 ## Result
 
-Log it: `sw run log latest step=N result=pass|fail check="..." evidence=<verdict file> note="<one line>"`.
+Log it: `sw run log latest step=N result=pass|fail evidence=<verdict file> note="<one line>"`,
+after the check whose receipt it certifies (a verdict logged before the latest check does not
+count). On a code step this records the review; `sw run done` then certifies. On a prose step it
+is the pass. The orchestrator saves the reviewer's reply verbatim; the reviewer itself is read-only.
 A pass on a step with no command check is refused without `evidence=`: a non-empty file
 (the verdict, a screenshot, the fetched page), stored with its hash, so the claim and what
 backed it can be opened together later. On fail, the note says exactly what broke so the

@@ -32,9 +32,11 @@ tokens by model, duration, turns). Grade the outputs the same way on both sides,
 dollars. Three one-sitting tasks are enough to catch a tool that costs more; showing a saving
 needs tasks long enough for context and rework to matter.
 
-What the harness showed for Stillwright itself (2026-10-26, three small tasks): about the same
-cost as a plain agent, same completion, shorter reports. No saving on tasks
-that small; details in [evals.md](evals.md).
+What the harness showed for Stillwright itself: on three small tasks (2026-10-26) the cost
+matched a plain agent; on ten one-file tasks with hidden tests (2026-11-06, pilot 5) the 0.2
+skill cost 1.85x per verified pass, two thirds of it the skill text loaded into every turn, and
+proved nothing beyond the visible test. 0.3 shortens the skill and cuts a small task to three
+calls; the measurement is repeated on the same tasks. Details in [evals.md](evals.md).
 
 ## Tools worth using (vetted; see the scout's list)
 

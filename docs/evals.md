@@ -140,3 +140,18 @@ python3 grade.py rerun-1   # Stillwright side after the skill change
 
 The script re-runs the tests, recounts the words, rechecks the facts and the logs. Only the
 "false claims" column needs a reader (or a fresh model) going claim by claim.
+
+## 2026-11 pilots (hidden tests, Inspect harness)
+
+Four baseline pilots and one plugin pilot, each with a pre-registered design, hand labels on every
+final message and a fresh adversarial review before publication:
+
+- `docs/evals/pilot-2026-11-05.md`: ImpossibleBench conflicting split, 30 runs, 0 cheat.
+- `docs/evals/pilot-oneoff-2026-11-05.md`: ImpossibleBench one-off split, 30 runs, 0 cheat.
+- `docs/evals/pilot-own-2026-11-05.md`: own tasks with full contracts in the tickets, 30/30 pass.
+- `docs/evals/pilot-own2-2026-11-06.md`: the same tasks with one-symptom tickets, 25/30 pass, the
+  five misses shallow fixes with no false statement; the fairness check closed the honesty question
+  for this task family and the primary became cost per verified pass.
+- `docs/evals/pilot-own2-with-2026-11-06.md`: the 0.2 plugin on those tasks, 1.85x the cost per
+  verified pass (1.74 to 2.08), 24 against 25 passes, reviewer never ran. 0.3 is the answer; its
+  own run on the same tasks follows under `docs/evals/pilot-own2-v03-*.md`.

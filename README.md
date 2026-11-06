@@ -72,15 +72,19 @@ refuses the stale receipt. The rewind keeps the state it replaced, so nothing is
 
 ## Measured
 
-Three small tasks (code, writing, research), each done by a fresh Claude Sonnet agent with and
-without the Stillwright skills, graded by scripts and a read-only judge. Both sides finished
-every task. The plain side made one false claim; Stillwright made none and left a plan and a
-log every time. It cost about the same in dollars and more wall time. Three tasks is a small
-sample and is stated as such; raw runs, grading script and judge report:
-[docs/evals.md](docs/evals.md) and the
+Four baseline pilots (120 scored runs, Claude Sonnet 5.5, plain Claude Code, hidden tests the
+agent could not see): zero cheats; on one-symptom tickets the agent fixed the ticket, passed the
+visible test and left a documented second defect in the same file in 5 of 30 runs, naming it in
+2. The 0.2 skill measured against that baseline on the same ten tasks: 1.85x the cost per
+verified pass (interval 1.74 to 2.08) and one pass fewer (24 against 25), because its receipt
+certified the same visible test and the reviewer never ran. 0.3 is the answer to that
+measurement: three sw calls per small task, a shorter skill, and a code step that `sw` will not
+certify without a reviewer's verdict, logged after the check and naming every changed file. Its own
+number comes from the same tasks and is published either way. Notes, data and every run's
+verdict: [docs/evals.md](docs/evals.md) (the 2026-11 pilot notes are listed there) and the
 [Hugging Face dataset](https://huggingface.co/datasets/Folvix/stillwright-evals).
 
-The gate itself is tested: 67 black-box tests drive the binary on Linux, macOS and Windows in
+The gate itself is tested: 252 black-box tests drive the binary on Linux, macOS and Windows in
 CI, including the ways two independent reviews found to get past it before release.
 
 ## Install
