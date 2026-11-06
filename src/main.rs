@@ -239,6 +239,12 @@ enum RunCmd {
         #[arg(long, num_args = 1..)]
         freeze: Vec<String>,
     },
+    /// Record what the working directory holds now, as the baseline a later `sw run new` here
+    /// compares against (changes made before the run was opened still count). The plugin's
+    /// SessionStart hook does this through `sw run brief`; other hosts call it directly.
+    Baseline {
+        dir: Option<String>,
+    },
     /// `sw run check` then `sw run done` in one call: the receipt is written even when the
     /// certificate is refused (a failing check, a code step still waiting for its reviewer).
     Prove {
@@ -298,8 +304,12 @@ enum RunCmd {
         step: String,
     },
     /// The goal, the must-nots and the next step of the open run, in a few lines: what must
-    /// survive a context compaction. Prints nothing when no run is open.
-    Brief,
+    /// survive a context compaction. Prints nothing when no run is open. `--hook` reads the
+    /// host's SessionStart event on stdin and records the session baseline for its folder.
+    Brief {
+        #[arg(long)]
+        hook: bool,
+    },
     /// Steps that can start now: not passed yet, and every step in their `after:` passed.
     Next {
         #[arg(default_value = "latest")]
@@ -965,7 +975,14 @@ fn dir_manifest(root: &Path) -> Result<BTreeMap<String, String>> {
 const START_MANIFEST: &str = "files-start.json";
 const MANIFEST_MAX: usize = 20_000;
 
-fn write_start_manifest(run: &Path, cwd: &Path) -> Result<()> {
+fn write_start_manifest(store: &Store, run: &Path, cwd: &Path) -> Result<()> {
+    if let Some((ts, files)) = fresh_baseline(store, cwd)? {
+        let text = serde_json::to_string(&files).map_err(|e| e.to_string())?;
+        fs::write(run.join(START_MANIFEST), text)
+            .map_err(|e| format!("cannot write the start manifest: {e}"))?;
+        append_event(run, &[("event".into(), "baseline".into()), ("ts_recorded".into(), ts)])?;
+        return Ok(());
+    }
     let files = walk_files(cwd)?;
     if files.len() > MANIFEST_MAX {
         return Ok(());
@@ -973,6 +990,75 @@ fn write_start_manifest(run: &Path, cwd: &Path) -> Result<()> {
     let manifest = dir_manifest(cwd)?;
     let text = serde_json::to_string(&manifest).map_err(|e| e.to_string())?;
     fs::write(run.join(START_MANIFEST), text).map_err(|e| format!("cannot write the start manifest: {e}"))
+}
+
+/// Baselines live in the state folder, one per working directory, and count for BASELINE_HOURS:
+/// an old one would make last week's finished changes look like this run's.
+const BASELINE_HOURS: i64 = 12;
+
+fn baseline_path(store: &Store, cwd: &Path) -> PathBuf {
+    let key = fs::canonicalize(cwd)
+        .map(|c| c.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| cwd.to_string_lossy().into_owned());
+    let digest = format!("{:x}", Sha256::digest(key.as_bytes()));
+    store.root.join("baselines").join(format!("{}.json", &digest[..16]))
+}
+
+fn write_baseline(store: &Store, cwd: &Path) -> Result<usize> {
+    let files = walk_files(cwd)?;
+    if files.len() > MANIFEST_MAX {
+        return Err(format!(
+            "{} holds more than {MANIFEST_MAX} files; a baseline there would be slow and mean little. Open runs in the project folder.",
+            cwd.display()
+        ));
+    }
+    let manifest = dir_manifest(cwd)?;
+    let count = manifest.len();
+    let path = baseline_path(store, cwd);
+    fs::create_dir_all(path.parent().unwrap_or(&store.root)).map_err(|e| e.to_string())?;
+    let body = serde_json::json!({
+        "cwd": fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()).to_string_lossy(),
+        "ts": now(),
+        "files": manifest,
+    });
+    fs::write(&path, serde_json::to_string(&body).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(count)
+}
+
+/// The baseline for `cwd` if one was recorded within BASELINE_HOURS: (when, files).
+fn fresh_baseline(store: &Store, cwd: &Path) -> Result<Option<(String, BTreeMap<String, String>)>> {
+    let path = baseline_path(store, cwd);
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Ok(None);
+    };
+    let ts = body.get("ts").map(value_str).unwrap_or_default();
+    let Ok(when) = chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%dT%H:%M:%S") else {
+        return Ok(None);
+    };
+    let age = chrono::Local::now().naive_local() - when;
+    if age.num_hours() >= BASELINE_HOURS || age.num_seconds() < 0 {
+        return Ok(None);
+    }
+    let files: BTreeMap<String, String> = body
+        .get("files")
+        .and_then(|f| serde_json::from_value(f.clone()).ok())
+        .unwrap_or_default();
+    Ok(Some((ts, files)))
+}
+
+/// The SessionStart hook's event on stdin, when there is one: not a terminal, and JSON.
+fn hook_event_on_stdin() -> Option<serde_json::Value> {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        return None;
+    }
+    let mut text = String::new();
+    std::io::stdin().read_to_string(&mut text).ok()?;
+    serde_json::from_str(text.trim()).ok()
 }
 
 /// Source files (tests left out) added, changed or removed since the run started, relative to
@@ -988,16 +1074,31 @@ fn changed_source_files(run: &Path) -> Result<Vec<String>> {
     let now = dir_manifest(Path::new(&cwd))?;
     let mut changed = Vec::new();
     for (path, hash) in &now {
-        if start.get(path) != Some(hash) && !is_test_path(path) {
+        if start.get(path) != Some(hash) && is_source_path(path) {
             changed.push(path.clone());
         }
     }
     for path in start.keys() {
-        if !now.contains_key(path) && !is_test_path(path) {
+        if !now.contains_key(path) && is_source_path(path) {
             changed.push(format!("{path} (removed)"));
         }
     }
     Ok(changed)
+}
+
+/// What a reviewer judges: not tests, not logs, transcripts, temp or backup files, not
+/// anything under a dot-folder (`.claude`, `.sw-home`, `.idea`), which hosts and tools write
+/// during any run.
+fn is_source_path(rel: &str) -> bool {
+    if is_test_path(rel) {
+        return false;
+    }
+    if rel.split('/').any(|seg| seg.starts_with('.') && seg.len() > 1) {
+        return false;
+    }
+    let lower = rel.to_lowercase();
+    const NOISE: &[&str] = &[".log", ".jsonl", ".tmp", ".bak", ".swp", ".orig", ".pyc", ".pyo", ".class", ".o"];
+    !NOISE.iter().any(|ext| lower.ends_with(ext))
 }
 
 /// Test files by the usual conventions: a tests/test/__tests__/spec folder, test_*.py, *_test.py,
@@ -1052,6 +1153,48 @@ fn review_verdict(run: &Path, step: &str) -> Result<Option<(String, String)>> {
 
 fn verdict_file(run: &Path, step: &str) -> PathBuf {
     run.join("checks").join(format!("step-{step}-review.md"))
+}
+
+/// A verdict says PASS or FAIL first, and a PASS names every changed source file: a file the
+/// reviewer never mentioned is a file the reviewer never judged.
+fn check_verdict_shape(run: &Path, result: &str, verdict: &Path) -> Result<()> {
+    let text = fs::read_to_string(verdict)
+        .map_err(|e| format!("cannot read the verdict {}: {e}", verdict.display()))?;
+    let first = text
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c: char| !c.is_ascii_alphabetic())
+        .to_ascii_uppercase();
+    if first != "PASS" && first != "FAIL" {
+        return Err(format!(
+            "the verdict must start with PASS or FAIL ({} starts with {:?})",
+            verdict.display(),
+            text.split_whitespace().next().unwrap_or("")
+        ));
+    }
+    if first != result.to_ascii_uppercase() {
+        return Err(format!(
+            "the verdict says {first} but the log line says result={result}; log what the reviewer wrote"
+        ));
+    }
+    if result == "pass" {
+        let missing: Vec<String> = changed_source_files(run)?
+            .into_iter()
+            .filter(|p| !p.ends_with(" (removed)"))
+            .filter(|p| {
+                let base = p.rsplit('/').next().unwrap_or(p);
+                !text.contains(base)
+            })
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "the verdict does not mention {}; a PASS names every changed source file with what it documents and whether that holds",
+                missing.join(", ")
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Commit the working tree as a snapshot under `refs/sw/<run>/<label>`; the user's branch,
@@ -1985,6 +2128,11 @@ fn print_changed_sources(run: &Path, token: &str) -> Result<()> {
         "\nSource files changed since the run started (tests left out): {}",
         changed.join(", ")
     );
+    println!(
+        "For each of them, answer first: what does the file document (docstrings, comments, README) \
+         that the check did not exercise, and does the code deliver it? A documented behaviour left \
+         broken or unimplemented is FAIL. Name every file in the verdict."
+    );
     let cwd = run_cwd(run).unwrap_or_default();
     for rel in &changed {
         if rel.ends_with(" (removed)") {
@@ -2251,7 +2399,24 @@ fn run_stop(store: &Store, hook: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_brief(store: &Store) -> Result<()> {
+fn run_brief(store: &Store, hook: bool) -> Result<()> {
+    // With --hook, the SessionStart event on stdin: record the baseline for the session's folder
+    // first, so a run opened later in this session sees every change the session made, not only
+    // those after `sw run new`. Quiet on failure: the brief must never block a session start.
+    // Without --hook stdin is never read: a pipe with no writer would block forever.
+    if let Some(event) = hook.then(hook_event_on_stdin).flatten() {
+        let dir = event
+            .get("cwd")
+            .map(value_str)
+            .filter(|c| !c.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok());
+        if let Some(dir) = dir {
+            if dir.is_dir() {
+                let _ = write_baseline(store, &dir);
+            }
+        }
+    }
     // The newest open run started in this folder (or a parent or child of it): a run from
     // another project must not leak into this session's context.
     let here = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -2650,7 +2815,7 @@ fn enable_in_settings(path: &Path) -> Result<bool> {
         let hooks = hooks.as_object_mut().expect("checked");
         for (event, matcher, command) in [
             ("PreToolUse", "Bash", "sw gate --hook"),
-            ("SessionStart", "startup|resume|compact", "sw run brief"),
+            ("SessionStart", "startup|resume|compact", "sw run brief --hook"),
             // The Stop verdict travels as JSON on stdout, so the exit code carries nothing; `exit 0`
             // keeps an older sw without `run stop` (exit 2 on an unknown subcommand) from holding a turn.
             ("Stop", "", "sw run stop --hook; exit 0"),
@@ -3332,7 +3497,7 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                 .map(|d| d.to_string_lossy().into_owned())
                 .unwrap_or_default();
             if !cwd.is_empty() {
-                write_start_manifest(&dir, Path::new(&cwd))?;
+                write_start_manifest(store, &dir, Path::new(&cwd))?;
             }
             append_event(
                 &dir,
@@ -3350,6 +3515,14 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                 freeze_paths(&dir, &freeze)?;
             }
             println!("{}", dir.display());
+        }
+        RunCmd::Baseline { dir } => {
+            let cwd = match dir {
+                Some(d) => PathBuf::from(d),
+                None => std::env::current_dir().map_err(|e| e.to_string())?,
+            };
+            let count = write_baseline(store, &cwd)?;
+            println!("baseline recorded for {} ({count} files); runs opened here within {BASELINE_HOURS} hours compare against it", cwd.display());
         }
         RunCmd::Prove { run, step } => {
             let dir = store.resolve_run(&run)?;
@@ -3457,6 +3630,7 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                     if given.is_some() && given == expected {
                         // The fresh reviewer's verdict on a code step: recorded as `review`, never as
                         // the step's pass; `sw run done` still needs the receipt and this verdict.
+                        check_verdict_shape(&dir, &result, &verdict_file(&dir, &step))?;
                         let mut pairs = with_evidence(parsed, &dir, &run, &step)?;
                         pairs.retain(|(k, _)| k != "result" && k != "check");
                         pairs.push(("review".into(), result.clone()));
@@ -3527,7 +3701,7 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
         RunCmd::Freeze { run, paths } => run_freeze(&store.resolve_run(&run)?, &paths)?,
         RunCmd::Snapshot { run, step } => run_snapshot(&store.resolve_run(&run)?, &step)?,
         RunCmd::Rewind { run, step } => run_rewind(&store.resolve_run(&run)?, &step)?,
-        RunCmd::Brief => run_brief(store)?,
+        RunCmd::Brief { hook } => run_brief(store, hook)?,
         RunCmd::Stop { hook } => run_stop(store, hook)?,
         RunCmd::Stats => run_stats(store)?,
         RunCmd::Next { run } => {

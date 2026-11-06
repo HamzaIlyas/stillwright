@@ -958,7 +958,7 @@ class HookTests(SwTestCase):
         start = settings["hooks"]["SessionStart"]
         self.assertEqual(len(start), 1)
         self.assertIn("compact", start[0]["matcher"])
-        self.assertEqual(start[0]["hooks"][0]["command"], "sw run brief")
+        self.assertEqual(start[0]["hooks"][0]["command"], "sw run brief --hook")
         stop = settings["hooks"]["Stop"]
         self.assertEqual(len(stop), 1)
         self.assertNotIn("matcher", stop[0])  # Stop has no matcher; it fires on every stop
@@ -971,7 +971,7 @@ class HookTests(SwTestCase):
         self.assertEqual(plugin["PreToolUse"][0]["matcher"], "Bash")
         self.assertTrue(any(c.endswith("sw gate --hook") for c in commands["PreToolUse"]), commands)
         self.assertIn("compact", plugin["SessionStart"][0]["matcher"])
-        self.assertTrue(any(c.endswith("sw run brief") for c in commands["SessionStart"]), commands)
+        self.assertTrue(any(c.endswith("sw run brief --hook") for c in commands["SessionStart"]), commands)
         self.assertNotIn("matcher", plugin["Stop"][0])
         # the Stop hook blocks only through JSON on stdout, so its exit code is always 0: an older
         # sw without `run stop` (clap exits 2 on an unknown subcommand) must never hold a turn
@@ -2006,7 +2006,7 @@ class ContractReviewTests(SwTestCase):
         self.assertIn("-(-n // size)", packet)
         self.assertIn("document", packet)
         self.verdict.parent.mkdir(exist_ok=True)
-        self.verdict.write_text("PASS: the change rounds up; IndexError is not touched by this step\n")
+        self.verdict.write_text("PASS: mod.py rounds up as documented; IndexError is not touched by this step\n")
         out = self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={self.verdict}", cwd=self.work)
         self.assertIn("review", out)
         self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
@@ -2046,7 +2046,7 @@ class ContractReviewTests(SwTestCase):
         self.fix()
         self.sw("run", "check", "latest", "1", cwd=self.work)
         self.verdict.parent.mkdir(exist_ok=True)
-        self.verdict.write_text("PASS\n")
+        self.verdict.write_text("PASS: mod.py as documented\n")
         self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={self.verdict}", cwd=self.work)
         (self.work / "mod.py").write_text('"""doc"""\n\ndef page_count(n, size):\n    return max(1, -(-n // size))\n')
         self.sw("run", "check", "latest", "1", cwd=self.work)
@@ -2165,3 +2165,140 @@ class ThreeCallTests(SwTestCase):
             self.sw("run", "finish", "latest", "done", cwd=self.work)
         self.assertIn("step 1", str(cm.exception))
         self.assertNotIn("(done)", self.sw("goal", "list", "--all"))
+
+
+class SessionBaselineTests(SwTestCase):
+    """Changes made before `sw run new` are still changes: the session-start baseline (written by
+    the SessionStart hook through `sw run brief`, or by `sw run baseline`) is the manifest a run
+    compares against. Probe 2026-11-06: an agent edited first, opened the run second, and the
+    review requirement never fired."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        (self.work / "tests").mkdir(parents=True)
+        (self.work / "mod.py").write_text("X = 1\n")
+        (self.work / "tests" / "test_x.py").write_text("import unittest\nfrom mod import X\nclass T(unittest.TestCase):\n    def test_x(self):\n        self.assertEqual(X, 2)\n")
+        self.plan = self.work / "plan.txt"
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ python3 -m unittest discover -s tests\nOutward: none\n")
+
+    def test_baseline_command_then_edit_then_open_still_requires_the_review(self):
+        self.sw("run", "baseline", cwd=self.work)
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "new", "ship", "--plan", str(self.plan), cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+        self.assertIn("mod.py", str(cm.exception))
+
+    def test_brief_with_a_session_start_event_writes_the_baseline(self):
+        event = json.dumps({"session_id": "s1", "cwd": str(self.work), "hook_event_name": "SessionStart", "source": "startup"})
+        r = subprocess.run([SW, "run", "brief", "--hook"], input=event, env=self.env, capture_output=True, text=True, cwd=self.work)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "new", "ship", "--plan", str(self.plan), cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+    def test_without_a_baseline_the_start_manifest_is_used(self):
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "new", "ship", "--plan", str(self.plan), cwd=self.work)
+        self.assertIn("certified", self.sw("run", "prove", "latest", "1", cwd=self.work))
+
+    def test_a_stale_baseline_is_ignored(self):
+        self.sw("run", "baseline", cwd=self.work)
+        base = next((self.home / "baselines").glob("*.json"))
+        data = json.loads(base.read_text())
+        data["ts"] = "2020-01-01T00:00:00"
+        base.write_text(json.dumps(data))
+        (self.work / "mod.py").write_text("X = 2\n")
+        self.sw("run", "new", "ship", "--plan", str(self.plan), cwd=self.work)
+        self.assertIn("certified", self.sw("run", "prove", "latest", "1", cwd=self.work))
+
+
+class BriefNeverBlocksTests(SwTestCase):
+    def test_brief_without_hook_does_not_read_a_silent_stdin(self):
+        r, w = os.pipe()
+        try:
+            p = subprocess.Popen([SW, "run", "brief"], stdin=r, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            out, err = p.communicate(timeout=10)
+        finally:
+            os.close(r); os.close(w)
+        self.assertEqual(p.returncode, 0, err)
+
+
+class VerdictShapeTests(SwTestCase):
+    """A review verdict on a code step must say PASS or FAIL first and name every changed source
+    file, so a reviewer who never looked at a file cannot pass it by silence."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        (self.work / "tests").mkdir(parents=True)
+        (self.work / "mod.py").write_text("X = 1\n")
+        (self.work / "util.py").write_text("Y = 1\n")
+        (self.work / "tests" / "test_x.py").write_text("import unittest\nfrom mod import X\nclass T(unittest.TestCase):\n    def test_x(self):\n        self.assertEqual(X, 2)\n")
+        self.run = pathlib.Path(self.sw("run", "new", "v", cwd=self.work).strip())
+        (self.run / "plan.md").write_text("# Goal: g\nMust not: x\n1. a | check: $ python3 -m unittest discover -s tests\nOutward: none\n")
+        (self.work / "mod.py").write_text("X = 2\n")
+        (self.work / "util.py").write_text("Y = 2\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.verdict = self.run / "checks" / "step-1-review.md"
+        self.verdict.parent.mkdir(exist_ok=True)
+
+    def log(self):
+        return self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={self.verdict}", cwd=self.work)
+
+    def test_verdict_must_start_with_pass_or_fail(self):
+        self.verdict.write_text("Looks fine to me. mod.py util.py\n")
+        with self.assertRaises(Failed) as cm:
+            self.log()
+        self.assertIn("PASS or FAIL", str(cm.exception))
+
+    def test_verdict_must_name_every_changed_source_file(self):
+        self.verdict.write_text("PASS: mod.py rounds correctly\n")
+        with self.assertRaises(Failed) as cm:
+            self.log()
+        self.assertIn("util.py", str(cm.exception))
+
+    def test_a_complete_verdict_is_accepted(self):
+        self.verdict.write_text("PASS\n- mod.py: X documented as 2, now 2\n- util.py: Y bumped, nothing documented\n")
+        self.assertIn("review verdict recorded", self.log())
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_packet_asks_the_contract_question_per_file_first(self):
+        out = self.sw("run", "review", "latest", "1", cwd=self.work)
+        self.assertLess(out.index("document"), out.index("Latest check output"))
+        self.assertIn("mod.py", out)
+        self.assertIn("util.py", out)
+
+
+class SourceFileClassificationTests(SwTestCase):
+    """Logs, transcripts, caches and dot-folders are not source: they change during any run and a
+    reviewer has nothing to judge in them (probe 2026-11-06: the harness's stream.jsonl had to be
+    named in every verdict)."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        (self.work / "tests").mkdir(parents=True)
+        (self.work / "tests" / "test_x.py").write_text("import unittest\nclass T(unittest.TestCase):\n    def test_x(self):\n        pass\n")
+        run = pathlib.Path(self.sw("run", "new", "cls", cwd=self.work).strip())
+        (run / "plan.md").write_text("# Goal: g\nMust not: x\n1. a | check: $ python3 -m unittest discover -s tests\nOutward: none\n")
+
+    def test_logs_transcripts_and_dot_folders_do_not_require_a_review(self):
+        (self.work / "stream.jsonl").write_text('{"type":"assistant"}\n')
+        (self.work / "run.log").write_text("noise\n")
+        (self.work / "notes.tmp").write_text("x\n")
+        (self.work / ".claude").mkdir()
+        (self.work / ".claude" / "settings.json").write_text("{}\n")
+        self.assertIn("certified", self.sw("run", "prove", "latest", "1", cwd=self.work))
+
+    def test_a_real_source_file_still_does(self):
+        (self.work / "stream.jsonl").write_text('{"type":"assistant"}\n')
+        (self.work / "mod.py").write_text("X = 1\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.assertIn("mod.py", str(cm.exception))
+        self.assertNotIn("stream.jsonl", str(cm.exception))

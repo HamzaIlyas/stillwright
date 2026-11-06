@@ -37,13 +37,14 @@ The short form is in SKILL.md. This is the detail a long or unusual run needs.
   receipt (exit code, output hash, tree hash). `sw run done latest N` certifies: it refuses a
   failed receipt, a tampered frozen file, a receipt from another directory, a changed check
   command, a stale tree, and a code step without its review verdict. `sw run prove` is both.
-- **Code steps.** When the run changed source files (tests left out) and the step's check is a
+- **Code steps.** The plugin's SessionStart hook records a baseline of the folder (`sw run baseline` does it on other hosts), so a file edited before `sw run new` still counts as changed. When the run changed source files (tests left out) and the step's check is a
   test suite (`pytest`, `unittest`, `npm test`, `cargo test`, `go test`, ...), certification
   needs the reviewer's verdict in `checks/step-N-review.md`, logged with `sw run log latest
   step=N result=pass|fail evidence=<that file>` from the work folder; the verdict is bound to
-  the files as they were, so a later change needs a new review. The packet shows the changed
-  files with their content when short, and asks what they document that the check did not
-  exercise. A documented behaviour left broken or unimplemented is FAIL.
+  the files as they were, so a later change needs a new review. The verdict starts with PASS or
+  FAIL and a PASS names every changed source file. The packet shows the changed files with their
+  content when short and asks, per file, what it documents that the check did not exercise. A
+  documented behaviour left broken or unimplemented is FAIL.
 - **Prose, research, design.** Same packet, same verdict; here the verdict is the pass and
   the log line carries `result=pass evidence=<file>`.
 - The reviewer is a fresh read-only subagent on the small model that sees the packet and

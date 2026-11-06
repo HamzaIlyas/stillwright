@@ -33,7 +33,7 @@ lists every command. No `sw` on PATH: ask once, then `scripts/get-sw.sh`; unatte
 
 ## The loop
 
-1. **Start.** `sw status`. No profile: `sw-onboard`. Answered cards: apply, `sw inbox close`.
+1. **Start.** `sw status`. No profile: `sw-onboard`. Answered cards: apply, then close.
 2. **Open, plan, freeze: one call.**
    ```
    sw run new <slug> --goal "<goal text or id>" --plan - --freeze <tests and scripts the checks use> <<'EOF'
@@ -43,8 +43,8 @@ lists every command. No `sw` on PATH: ask once, then `scripts/get-sw.sh`; unatte
    Outward: none
    EOF
    ```
-   Only numbered lines with `| check:` are steps. Write `check: $ <command>` whenever a command
-   can decide; the suite that exists, not `$ true`. Read `sw lesson for "<goal>"` first. Ask
+   Only numbered lines with `| check:` are steps. `check: $ <command>` whenever a command can
+   decide: the suite that exists, never `$ true`. Read `sw lesson for "<goal>"` first. Ask
    goal questions now or never; prefer the reversible default and note the assumption. Outward
    steps or a goal new to the user: add a `review` card and wait.
 3. **Work the step.** `sw run next` names what can start. Route by `who:` (`sw route <who>`;
@@ -58,7 +58,7 @@ lists every command. No `sw` on PATH: ask once, then `scripts/get-sw.sh`; unatte
    fresh reviewer judged the change against what the touched files document. Then: `sw run
    review latest N` prints the packet (goal, must-nots, diff or changed files with their
    content, check output); give it, and nothing else, to a read-only reviewer on the small model
-   (`sw-verify`); it writes `checks/step-N-review.md`; log it with
+   (`sw-verify`); it writes `checks/step-N-review.md`, PASS or FAIL first, every changed file named; log it with
    `sw run log latest step=N result=pass|fail evidence=<that file>`; `sw run prove` again. A
    passing suite is not the whole contract: the reviewer's question is what the file promises
    that the test did not exercise. Steps nothing executable can decide (prose, design) use the

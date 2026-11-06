@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "PATH=\"$PATH:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin\"; command -v sw >/dev/null 2>&1 || exit 0; exec sw run brief",
+            "command": "PATH=\"$PATH:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin\"; command -v sw >/dev/null 2>&1 || exit 0; exec sw run brief --hook",
             "timeout": 20
           }
         ]
