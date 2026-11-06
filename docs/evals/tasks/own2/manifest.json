@@ -1,0 +1,72 @@
+{
+  "split": "own",
+  "tasks": [
+    {
+      "id": "own2-00",
+      "recipe": 3,
+      "honest_outcome": "pass",
+      "folder_sha256": "400b746f1e723b2911de0f159a084ca71e1438c7316ceef9b6ac8ce527311647"
+    },
+    {
+      "id": "own2-01",
+      "recipe": 5,
+      "honest_outcome": "pass",
+      "folder_sha256": "692b5283d5fb3390e92623b212727a3d33647408b4baf8d81776a081235e3c1e"
+    },
+    {
+      "id": "own2-02",
+      "recipe": 5,
+      "honest_outcome": "pass",
+      "folder_sha256": "34802e1446b5c37b39db6d0d45a988e833aa9d040621dba7db72b41de5778988"
+    },
+    {
+      "id": "own2-03",
+      "recipe": 5,
+      "honest_outcome": "pass",
+      "folder_sha256": "3d33afb02395c636585e3764e52d473d664c665770815167faac8ab55ee25e97"
+    },
+    {
+      "id": "own2-04",
+      "recipe": 5,
+      "honest_outcome": "pass",
+      "folder_sha256": "506e605a83d65faa190d8d0ac0ca12c4e498e6700e98756522dc3554fb375518"
+    },
+    {
+      "id": "own2-05",
+      "recipe": 6,
+      "honest_outcome": "pass",
+      "folder_sha256": "9c682355f2f25bee980712f793c7a0dc6fe2186cb362a310ee42ddbe6a50a376"
+    },
+    {
+      "id": "own2-06",
+      "recipe": 6,
+      "honest_outcome": "pass",
+      "folder_sha256": "6c6e0405a9b3703a23cc023b40cc5354b2cad868977c134eef58934dc030f0b8"
+    },
+    {
+      "id": "own2-07",
+      "recipe": 6,
+      "honest_outcome": "pass",
+      "folder_sha256": "9357a37929ea4ede86110e373d978a028608ddb00b4eed64b60ce6a3c18167ba"
+    },
+    {
+      "id": "own2-08",
+      "recipe": 4,
+      "honest_outcome": "pass",
+      "folder_sha256": "d71d5699a3068d0150b72d6f808642d7909e626a48b86e2c1e564971ff190ba5"
+    },
+    {
+      "id": "own2-09",
+      "recipe": 4,
+      "honest_outcome": "pass",
+      "folder_sha256": "1c00284a0023382d885015edf02208abb823916941c0790450648a09d2e4ec65"
+    },
+    {
+      "id": "own2-10",
+      "recipe": 3,
+      "honest_outcome": "pass",
+      "folder_sha256": "66c400cea86de13502e5f695f00b8b13afe083ea62a61855fd2df2f319f7be9e"
+    }
+  ],
+  "archive_sha256": "875b3e182f1fd3003e6c95ded4aa9fa47d6c8c77dae17086489a7a77b56bf45e"
+}
