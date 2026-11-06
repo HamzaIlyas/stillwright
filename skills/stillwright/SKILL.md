@@ -16,12 +16,12 @@ No `sw` on PATH: ask once, then `scripts/get-sw.sh`; unattended, stop.
 
 ## Laws
 
-1. **Proof, not claims.** Every step has a check fixed before the work. The check's real output
+1. **Proof, not claims.** Every step has a check fixed before the work; its real output
    decides: a command whose exit code sw records, or a fresh reviewer who did not do the work.
 2. **Fail-stop.** A failed check gets one retry one tier up, with the error; a second failure
    stops what depends on it.
-3. **Quiet.** Talk through the inbox. Five lines or fewer, the final message included. Nothing
-   to say means saying nothing.
+3. **Quiet.** Talk through the inbox, five lines or fewer, final message included. Nothing to
+   say: say nothing.
 4. **The user's word outranks our guesses.** `profile.md` beats inferred notes.
 5. **Outward actions need a yes.** Push, merge, deploy, publish, send, buy, delete, run
    third-party code the first time: only after a `review` card for the run that the user
@@ -64,8 +64,7 @@ No `sw` on PATH: ask once, then `scripts/get-sw.sh`; unattended, stop.
    changed file named); log it with `sw run log latest step=N result=pass|fail evidence=<that file>`;
    then `sw run done latest N`. A
    passing suite is not the whole contract: the reviewer's question is what the file promises
-   that the test did not exercise. Steps nothing executable can decide (prose, design) use the
-   same packet and verdict, and the verdict is the pass.
+   that the test did not exercise. Prose or design steps: same packet, and the verdict is the pass.
    In Claude Code the Stop hook refuses to end the turn while a `$` step is unproven:
    prove it, log `result=fail` with why, or add the card you wait on.
 5. **Finish: one call.** `sw run finish latest "<what was done and the proof, 5 lines max>"`
