@@ -11,15 +11,15 @@ metadata:
 # Stillwright
 
 A quiet maker: work gets done, and every result the user sees was proven, not claimed.
-`sw` keeps all state in `~/.stillwright`; `sw status` is the one-screen summary, `sw --help`
-lists every command. No `sw` on PATH: ask once, then `scripts/get-sw.sh`; unattended, stop.
+`sw` keeps all state in `~/.stillwright`; `sw status` summarises, `sw --help` lists commands.
+No `sw` on PATH: ask once, then `scripts/get-sw.sh`; unattended, stop.
 
 ## Laws
 
 1. **Proof, not claims.** Every step has a check fixed before the work. The check's real output
    decides: a command whose exit code sw records, or a fresh reviewer who did not do the work.
-2. **Fail-stop.** A failed check gets one retry, one model tier up, with the error. A second
-   failure stops what depends on it.
+2. **Fail-stop.** A failed check gets one retry one tier up, with the error; a second failure
+   stops what depends on it.
 3. **Quiet.** Talk through the inbox. Five lines or fewer, the final message included. Nothing
    to say means saying nothing.
 4. **The user's word outranks our guesses.** `profile.md` beats inferred notes.
@@ -51,11 +51,11 @@ lists every command. No `sw` on PATH: ask once, then `scripts/get-sw.sh`; unatte
    file. Route by `who:` (`sw route <who>`;
    small by default, mid for judgement no command checks, top only after mid failed), through
    `sw-worker` with a self-contained brief. Dangerous commands go through the gate (`sw gate`).
-   Tools: installed first, `sw-scout`, then `sw-forge`. Research `sw-deep-search`; heavy
-   context `sw-context-diet`; launches `sw-launch`; no goal anywhere: `sw-radar`, then stop.
+   Tools: installed, `sw-scout`, then `sw-forge`. Research: `sw-deep-search`; heavy context:
+   `sw-context-diet`; launches: `sw-launch`; no goal anywhere: `sw-radar`, then stop.
 4. **Prove it: one call.** `sw run prove latest N` runs the check, writes the receipt and
-   certifies the step. It refuses, with the reason, when the check fails, when frozen files
-   changed, when the tree changed since the check, and when a **code step needs its review**:
+   certifies the step. It refuses, with the reason, on a failing check, a changed frozen file, a
+   tree changed since the check, and a **code step that needs its review**:
    a step after which code or test files changed is certified only once a fresh reviewer judged
    the change against what the touched files document, whatever the check command was. Then: `sw run
    review latest N` prints the packet (goal, must-nots, diff or changed files with their
@@ -69,15 +69,14 @@ lists every command. No `sw` on PATH: ask once, then `scripts/get-sw.sh`; unatte
    In Claude Code the Stop hook refuses to end the turn while a `$` step is unproven:
    prove it, log `result=fail` with why, or add the card you wait on.
 5. **Finish: one call.** `sw run finish latest "<what was done and the proof, 5 lines max>"`
-   closes the goal and adds the notify card. Your final message is that text and nothing more.
+   closes the goal and adds the notify card; your final message is that text.
    Preference learned: `sw note add --source`. Lesson learned: `sw lesson add`.
 
 ## Cost
 
 Measured 2026-11-06 on ten one-file tasks (`docs/evals.md`): the 0.2 skill cost 1.85x per
-verified pass against plain Claude Code and proved nothing more; its receipt certified the same
-visible test. 0.3 answers with the three calls, the shorter skill and the review on code steps.
-Still: small model by default; pipe long output through `tail`/`grep`; never switch the main
-model mid-run; mention `plan.md` and the log, never paste them. Budget per run: 30 subagent
-calls or 2 hours; at the limit stop, log, one notify card.
+verified pass against plain Claude Code and proved nothing more. 0.3 answers with the three
+calls, the shorter skill and the review on code steps. Still: small model by default; pipe long
+output through `tail`/`grep`; never switch the main model mid-run; mention `plan.md` and the log,
+never paste them. Budget per run: 30 subagent calls or 2 hours; at the limit stop, log, one card.
 More: [references/loop.md](references/loop.md), [references/unattended.md](references/unattended.md).

@@ -1153,7 +1153,11 @@ fn review_files(run: &Path) -> Result<Option<Vec<String>>> {
         run.join(START_MANIFEST)
     };
     let Ok(text) = fs::read_to_string(&base_path) else {
-        if status.is_empty() || status.starts_with("unavailable") {
+        if status.is_empty() {
+            // A run opened by an older sw: it recorded nothing, and nothing was taken away.
+            return Ok(Some(Vec::new()));
+        }
+        if status.starts_with("unavailable") {
             return Ok(None);
         }
         return Err(format!(
