@@ -875,41 +875,23 @@ fn tree_of_worktree(top: &str, keep_objects: bool) -> Result<String> {
 /// Stage the working tree into the store's index and write it as a tree object.
 fn stage_tree(top: &str, store: &TempStore) -> Result<String> {
     let envs = store.envs();
-    let mut add = vec!["add", "-A", "--", "."];
-    let exclude;
-    if let Ok(state) = state_root().and_then(|s| fs::canonicalize(s).map_err(|e| e.to_string())) {
-        if let Ok(top_real) = fs::canonicalize(top) {
-            if let Ok(rel) = state.strip_prefix(&top_real) {
-                exclude = format!(":(exclude){}", rel.to_string_lossy().replace('\\', "/"));
-                add.push(&exclude);
-            }
-        }
-    }
-    git(Some(top), &envs, &add).ok_or_else(|| {
+    git(Some(top), &envs, &["add", "-A", "--", "."]).ok_or_else(|| {
         format!(
             "git could not read the working tree at {top} (`git add -A` failed: an unreadable file, permissions, or safe.directory?)"
         )
     })?;
-    // Host folders and noise files are not the work: they must not make a receipt stale. They
-    // are dropped from the temporary index afterwards (an exclude pathspec on `git add` errors
-    // when it happens to name an ignored path).
-    let mut drop: Vec<String> = vec!["rm".into(), "-r".into(), "--cached".into(), "-q".into(), "--ignore-unmatch".into(), "--".into()];
-    for d in HOST_DIRS_ANYWHERE {
-        drop.push(format!(":(glob){d}/**"));
-        drop.push(format!(":(glob)**/{d}/**"));
-        drop.push(d.to_string());
-        drop.push(format!(":(glob)**/{d}"));
+    // The state folder is never part of a snapshot. It is dropped from the temporary index after
+    // the add: an exclude pathspec that names an ignored path makes `git add` fail.
+    if let Ok(state) = state_root().and_then(|s| fs::canonicalize(s).map_err(|e| e.to_string())) {
+        if let Ok(top_real) = fs::canonicalize(top) {
+            if let Ok(rel) = state.strip_prefix(&top_real) {
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                if !rel.is_empty() {
+                    let _ = git(Some(top), &envs, &["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", &rel]);
+                }
+            }
+        }
     }
-    for e in NOISE_EXT {
-        drop.push(format!(":(glob)**/*{e}"));
-        drop.push(format!("*{e}"));
-    }
-    for n in NOISE_NAMES {
-        drop.push(n.to_string());
-        drop.push(format!(":(glob)**/{n}"));
-    }
-    let drop_args: Vec<&str> = drop.iter().map(String::as_str).collect();
-    let _ = git(Some(top), &envs, &drop_args);
     git(Some(top), &envs, &["write-tree"]).ok_or_else(|| "git write-tree failed".to_string())
 }
 
@@ -928,20 +910,17 @@ fn git_top_of(dir: &Path) -> Option<String> {
     git(Some(&dir.to_string_lossy()), &[], &["rev-parse", "--show-toplevel"])
 }
 
-/// Hash of the working tree for a run: git's tree hash inside a repository, an error when git
-/// fails there; outside one a content hash (`dir:<sha256>`) of the folder the run was opened in,
+/// Hash of the work for a run: a content hash (`dir:<sha256>`) over exactly the files the review
+/// covers (`walk_files` of the review root: git's listing inside a repository, a walk outside),
 /// joined with the current folder's when sw runs somewhere else, so a receipt binds the work
-/// wherever the check was run from.
+/// wherever the check was run from and what the hash binds is what the reviewer sees.
 fn worktree_hash_for(run: &Path) -> Result<String> {
-    if let Some(top) = git_top() {
-        return tree_of_worktree(&top, false);
-    }
     let root = review_root(run)?;
     let here = std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
     let here_c = fs::canonicalize(&here).unwrap_or_else(|_| here.clone());
     let root_c = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
     let root_hash = dir_hash(&root)?;
-    if here_c.starts_with(&root_c) {
+    if here_c.starts_with(&root_c) || root_c.starts_with(&here_c) {
         return Ok(format!("dir:{root_hash}"));
     }
     let here_hash = dir_hash(&here)?;
@@ -965,12 +944,18 @@ const NOISE_NAMES: &[&str] = &[".coverage", "stderr.txt", "stdout.txt"];
 const BIG_FILE: u64 = 8 * 1024 * 1024;
 
 fn is_noise_path(rel: &str) -> bool {
+    noise_path(rel, false)
+}
+
+/// Inside git the listing already leaves ignored output out, so a tracked top-level `build/`
+/// is code; outside git a top-level build folder is taken for output.
+fn noise_path(rel: &str, in_git: bool) -> bool {
     let lower = rel.to_lowercase();
     let segs: Vec<&str> = lower.split('/').collect();
     if segs.iter().any(|seg| HOST_DIRS_ANYWHERE.contains(seg)) {
         return true;
     }
-    if segs.len() > 1 && HOST_DIRS_TOP.contains(&segs[0]) {
+    if !in_git && segs.len() > 1 && HOST_DIRS_TOP.contains(&segs[0]) {
         return true;
     }
     if is_test_path(rel) {
@@ -989,16 +974,25 @@ fn walk_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
     let root_s = root.to_string_lossy().into_owned();
     let state = state_root().ok().and_then(|s| fs::canonicalize(s).ok());
     if git(Some(&root_s), &[], &["rev-parse", "--show-toplevel"]).is_some() {
-        if let Some(listing) = git(Some(&root_s), &[], &["ls-files", "-co", "--exclude-standard", "-z"]) {
+        let tracked = git(Some(&root_s), &[], &["ls-files", "-z"]);
+        let untracked = git(Some(&root_s), &[], &["ls-files", "-o", "--exclude-standard", "-z"]);
+        if let (Some(tracked), Some(untracked)) = (tracked, untracked) {
             let state_rel = state.as_ref().and_then(|st| {
                 fs::canonicalize(root).ok().and_then(|r| st.strip_prefix(r).ok().map(|p| p.to_string_lossy().replace('\\', "/")))
             });
-            for rel in listing.split('\0').filter(|r| !r.is_empty()) {
-                if state_rel.as_deref().is_some_and(|sr| rel == sr || rel.starts_with(&format!("{sr}/"))) {
-                    continue;
-                }
+            let in_state = |rel: &str| state_rel.as_deref().is_some_and(|sr| rel == sr || rel.starts_with(&format!("{sr}/")));
+            // Tracked files are the work, whatever they are called; a tracked log is a fixture.
+            for rel in tracked.split('\0').filter(|r| !r.is_empty()) {
                 let path = root.join(rel);
-                if path.is_file() && !is_noise_path(rel) {
+                if path.is_file() && !in_state(rel) && !rel.split('/').any(|seg| seg == ".git") {
+                    files.push((rel.to_string(), path));
+                }
+            }
+            // Untracked files pass the noise filter: hosts and tools write logs, caches and
+            // settings during any run, and none of that is the work.
+            for rel in untracked.split('\0').filter(|r| !r.is_empty()) {
+                let path = root.join(rel);
+                if path.is_file() && !in_state(rel) && !noise_path(rel, true) {
                     files.push((rel.to_string(), path));
                 }
             }
@@ -1043,8 +1037,9 @@ fn walk_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
     Ok(files)
 }
 
-/// sha256 of a file's content, or of its length when it is large or unreadable.
-fn file_digest(path: &Path) -> String {
+/// sha256 of a file's content, or of its length and modification time when it is large; an
+/// error when it cannot be read.
+fn file_digest(path: &Path) -> std::result::Result<String, String> {
     match fs::metadata(path) {
         Ok(m) if m.len() > BIG_FILE => {
             let mtime = m
@@ -1053,20 +1048,20 @@ fn file_digest(path: &Path) -> String {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
-            format!("{:x}", Sha256::digest(format!("size:{} mtime:{mtime}", m.len()).as_bytes()))
+            Ok(format!("{:x}", Sha256::digest(format!("size:{} mtime:{mtime}", m.len()).as_bytes())))
         }
-        _ => match fs::read(path) {
-            Ok(bytes) => format!("{:x}", Sha256::digest(&bytes)),
-            Err(_) => format!("{:x}", Sha256::digest(b"unreadable")),
-        },
+        _ => fs::read(path)
+            .map(|bytes| format!("{:x}", Sha256::digest(&bytes)))
+            .map_err(|e| format!("cannot read {}: {e}", path.display())),
     }
 }
 
-/// sha256 over every bound file under `root`: length-prefixed path and digest.
+/// sha256 over every bound file under `root`: length-prefixed path and digest. A file that
+/// cannot be read is an error: a receipt that is blind to a file is no receipt.
 fn dir_hash(root: &Path) -> Result<String> {
     let mut digest = Sha256::new();
     for (rel, file) in walk_files(root)? {
-        let d = file_digest(&file);
+        let d = file_digest(&file).map_err(|e| format!("{e}; the receipt would be blind to it"))?;
         digest.update(rel.len().to_le_bytes());
         digest.update(rel.as_bytes());
         digest.update(d.len().to_le_bytes());
@@ -1075,12 +1070,13 @@ fn dir_hash(root: &Path) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-/// Relative path -> sha256 of its content, for every bound file under `root`.
+/// Relative path -> sha256 of its content, for every bound file under `root`. An unreadable file
+/// is recorded as such, so a manifest can always be taken; the hash is where it refuses.
 fn dir_manifest(root: &Path) -> Result<BTreeMap<String, String>> {
     Ok(walk_files(root)?
         .into_iter()
         .map(|(rel, file)| {
-            let d = file_digest(&file);
+            let d = file_digest(&file).unwrap_or_else(|_| "unreadable".to_string());
             (rel, d)
         })
         .collect())
@@ -1181,13 +1177,21 @@ fn hook_event_on_stdin() -> Option<serde_json::Value> {
 
 /// What a step has to answer for: files that changed since the last certified step (or the start)
 /// and that a reviewer must look at (code and tests). `None` when the run cannot know.
-fn review_files(run: &Path) -> Result<Option<Vec<String>>> {
+fn snapshot_manifest(run: &Path, step: &str) -> PathBuf {
+    run.join(format!("files-snapshot-{step}.json"))
+}
+
+fn review_files(run: &Path, step: &str) -> Result<Option<Vec<String>>> {
     let status = log_events(run)?
         .iter()
         .find(|e| event_is(e, "event", "start"))
         .and_then(|e| e.get("manifest").map(value_str))
         .unwrap_or_default();
-    let base_path = if run.join(CERTIFIED_MANIFEST).exists() {
+    // The base a step answers against: its own snapshot when one was taken, else the last
+    // certified step, else the start of the run.
+    let base_path = if snapshot_manifest(run, step).exists() {
+        snapshot_manifest(run, step)
+    } else if run.join(CERTIFIED_MANIFEST).exists() {
         run.join(CERTIFIED_MANIFEST)
     } else {
         run.join(START_MANIFEST)
@@ -1206,15 +1210,17 @@ fn review_files(run: &Path) -> Result<Option<Vec<String>>> {
         ));
     };
     let base: BTreeMap<String, String> = serde_json::from_str(&text).unwrap_or_default();
-    let now = dir_manifest(&review_root(run)?)?;
+    let root = review_root(run)?;
+    let in_git = git_top_of(&root).is_some();
+    let now = dir_manifest(&root)?;
     let mut changed = Vec::new();
     for (path, hash) in &now {
-        if base.get(path) != Some(hash) && needs_review_path(path) {
+        if base.get(path) != Some(hash) && needs_review_path(path, in_git) {
             changed.push(path.clone());
         }
     }
     for path in base.keys() {
-        if !now.contains_key(path) && needs_review_path(path) {
+        if !now.contains_key(path) && needs_review_path(path, in_git) {
             changed.push(format!("{path} (removed)"));
         }
     }
@@ -1223,13 +1229,13 @@ fn review_files(run: &Path) -> Result<Option<Vec<String>>> {
 
 /// What a reviewer must hold against the contract: every bound file except documents and media.
 /// Data files, env files, templates and scripts change behaviour; a README does not.
-fn needs_review_path(rel: &str) -> bool {
+fn needs_review_path(rel: &str, in_git: bool) -> bool {
     const DOC_EXT: &[&str] = &[".md", ".rst", ".adoc", ".markdown"];
     const MEDIA_EXT: &[&str] = &[
         ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".pdf", ".woff", ".woff2", ".ttf",
         ".otf", ".mp4", ".mp3", ".wav", ".zip", ".gz", ".tar", ".whl", ".jar",
     ];
-    if is_noise_path(rel) {
+    if noise_path(rel, in_git) {
         return false;
     }
     if is_test_path(rel) {
@@ -1311,7 +1317,7 @@ fn names_file(text: &str, base: &str) -> bool {
 
 /// A verdict says PASS or FAIL first, and a PASS names every file under review: a file the
 /// reviewer never mentioned is a file the reviewer never judged.
-fn check_verdict_shape(run: &Path, result: &str, verdict: &Path) -> Result<()> {
+fn check_verdict_shape(run: &Path, step: &str, result: &str, verdict: &Path) -> Result<()> {
     let text = fs::read_to_string(verdict)
         .map_err(|e| format!("cannot read the verdict {}: {e}", verdict.display()))?;
     let first = text
@@ -1333,7 +1339,7 @@ fn check_verdict_shape(run: &Path, result: &str, verdict: &Path) -> Result<()> {
         ));
     }
     if result == "pass" {
-        let missing: Vec<String> = review_files(run)?
+        let missing: Vec<String> = review_files(run, step)?
             .unwrap_or_default()
             .into_iter()
             .map(|p| p.trim_end_matches(" (removed)").to_string())
@@ -1399,8 +1405,15 @@ fn free_label(top: &str, run: &Path, base: &str) -> String {
 }
 
 fn run_snapshot(run: &Path, step: &str) -> Result<()> {
-    let top = git_top().ok_or("a snapshot needs a git repository here")?;
+    let root = review_root(run)?;
+    let top = git_top_of(&root).ok_or("a snapshot needs a git repository where the run was opened")?;
     note_plan(run)?;
+    // The step's review answers against this moment, not the run's start.
+    if let Ok(m) = dir_manifest(&root) {
+        if let Ok(text) = serde_json::to_string(&m) {
+            let _ = fs::write(snapshot_manifest(run, step), text);
+        }
+    }
     let label = format!("step-{step}");
     let commit = take_snapshot(
         &top,
@@ -1424,7 +1437,7 @@ fn run_snapshot(run: &Path, step: &str) -> Result<()> {
 /// Restore the files of a step's snapshot. Files that exist now but not in the snapshot are
 /// removed unless git ignores them; the state being replaced is snapshotted first.
 fn run_rewind(run: &Path, step: &str) -> Result<()> {
-    let top = git_top().ok_or("a rewind needs a git repository here")?;
+    let top = git_top_of(&review_root(run)?).ok_or("a rewind needs a git repository where the run was opened")?;
     let target = snapshot_ref(run, &format!("step-{step}"));
     let commit =
         git(Some(&top), &[], &["rev-parse", "--verify", "-q", &target]).ok_or_else(|| {
@@ -1831,9 +1844,9 @@ fn run_done(store: &Store, run: &Path, step: &str) -> Result<()> {
             "step {step}: the check ran in another directory ({there}); run `sw run done` from there, or check again here"
         ));
     }
-    if git_top().is_none() {
+    if git_top_of(&review_root(run)?).is_none() {
         eprintln!(
-            "note: no git repository here: the receipt binds a hash of this folder's files (build output and caches left out); snapshots and rewind are unavailable"
+            "note: no git repository here: the receipt binds a hash of this folder's files (host folders, logs and caches left out); snapshots and rewind are unavailable"
         );
     }
     let ran = receipt.get("cmd").map(value_str).unwrap_or_default();
@@ -1854,7 +1867,7 @@ fn run_done(store: &Store, run: &Path, step: &str) -> Result<()> {
     }
     let name = file_name(run);
     let verdict = verdict_file(run, step);
-    let needs = match review_files(run)? {
+    let needs = match review_files(run, step)? {
         None => Some("the run could not record what this folder held when it started, so nothing can say which files this step changed".to_string()),
         Some(list) if !list.is_empty() => Some(format!("{} changed since the run started (or the last certified step)", list.join(", "))),
         Some(_) => None,
@@ -1894,7 +1907,7 @@ fn run_done(store: &Store, run: &Path, step: &str) -> Result<()> {
     if let Some(ts) = receipt.get("ts") {
         event.insert("receipt".into(), ts.clone());
     }
-    if let Some(top) = git_top() {
+    if let Some(top) = git_top_of(&root) {
         let label = format!("step-{step}");
         let commit = take_snapshot(
             &top,
@@ -2052,6 +2065,8 @@ fn with_evidence(
 
 /// The most lines a section of the review packet may take; the rest is counted, not shown.
 const PACKET_LINES: usize = 400;
+/// The most bytes of one changed file the packet prints in full.
+const PACKET_FILE_BYTES: usize = 12_000;
 /// Spotlighting (Hines 2024): marking where untrusted text begins and ends cut indirect
 /// prompt-injection success from over 50% to under 2% in their measurement. Not a boundary.
 fn fence_begins(token: &str) -> String {
@@ -2232,13 +2247,13 @@ fn run_review(run: &Path, step: &str) -> Result<()> {
     println!("Step {step}: {line}");
     println!("Check: {check}");
     let token = fence_token();
-    match git_top() {
+    match git_top_of(&review_root(run)?) {
         Some(top) => print_changes(&top, run, step, &token)?,
         None => println!(
             "\nChanges: no git repository here, so there is no diff; the source files changed since the run started follow."
         ),
     }
-    print_changed_sources(run, &token)?;
+    print_changed_sources(run, step, &token)?;
     if let Some(receipt) = latest_receipt(run, step)? {
         let name = receipt.get("log").map(value_str).unwrap_or_default();
         let cmd = receipt.get("cmd").map(value_str).unwrap_or_default();
@@ -2279,8 +2294,8 @@ fn run_review(run: &Path, step: &str) -> Result<()> {
 
 /// The source files a step changed since the run started, with their current content when
 /// short, so a reviewer can hold the change against what the file documents.
-fn print_changed_sources(run: &Path, token: &str) -> Result<()> {
-    let Some(changed) = review_files(run)? else {
+fn print_changed_sources(run: &Path, step: &str, token: &str) -> Result<()> {
+    let Some(changed) = review_files(run, step)? else {
         println!("\nFiles changed since the run started: unknown (the folder was too large to list), so every file the step touched is under review");
         return Ok(());
     };
@@ -2306,13 +2321,13 @@ fn print_changed_sources(run: &Path, token: &str) -> Result<()> {
         }
         let path = Path::new(&cwd).join(rel);
         match fs::read_to_string(&path) {
-            Ok(text) if text.lines().count() <= PACKET_LINES / 2 => {
+            Ok(text) if text.lines().count() <= PACKET_LINES / 2 && text.len() <= PACKET_FILE_BYTES => {
                 println!("\n--- {rel}, as it is now ---");
                 println!("{}", fence_begins(token));
-                println!("{}", text.trim_end());
+                println!("{}", clip_lines(text.trim_end(), PACKET_LINES / 2));
                 println!("{}", fence_ends(token));
             }
-            Ok(text) => println!("{rel}: {} lines, open it", text.lines().count()),
+            Ok(text) => println!("{rel}: {} lines, {} bytes, open it", text.lines().count(), text.len()),
             Err(_) => println!("{rel}: not a text file, open it"),
         }
     }
@@ -2584,7 +2599,10 @@ fn run_brief(store: &Store, hook: bool) -> Result<()> {
         if let Some(dir) = dir {
             let dir = git_top_of(&dir).map(PathBuf::from).unwrap_or(dir);
             let fresh = fresh_baseline(store, &dir).ok().flatten().is_some();
-            if dir.is_dir() && (source == "startup" || !fresh) {
+            // A fresh baseline is kept whatever the event says: the event is text anyone can send.
+            // `sw run done` and `sw run finish` renew it; otherwise it lapses after BASELINE_HOURS.
+            let _ = source;
+            if dir.is_dir() && !fresh {
                 let _ = write_baseline_forced(store, &dir);
             }
         }
@@ -3838,7 +3856,7 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                     if given.is_some() && given == expected {
                         // The fresh reviewer's verdict on a code step: recorded as `review`, never as
                         // the step's pass; `sw run done` still needs the receipt and this verdict.
-                        check_verdict_shape(&dir, &result, &verdict_file(&dir, &step))?;
+                        check_verdict_shape(&dir, &step, &result, &verdict_file(&dir, &step))?;
                         let mut pairs = with_evidence(parsed, &dir, &run, &step)?;
                         pairs.retain(|(k, _)| k != "result" && k != "check");
                         pairs.push(("review".into(), result.clone()));
@@ -3863,7 +3881,7 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                     require_consent(store, &dir, &step)?;
                     // Code or tests changed under a prose check: the pass is the reviewer's verdict,
                     // in the file the packet names, shaped like any other.
-                    let must_review = !matches!(review_files(&dir)?, Some(ref v) if v.is_empty());
+                    let must_review = !matches!(review_files(&dir, &step)?, Some(ref v) if v.is_empty());
                     if must_review {
                         let expected = fs::canonicalize(verdict_file(&dir, &step)).ok().map(plain_path);
                         let given = value("evidence")
@@ -3875,7 +3893,7 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                                 verdict_file(&dir, &step).display()
                             ));
                         }
-                        check_verdict_shape(&dir, &result, &verdict_file(&dir, &step))?;
+                        check_verdict_shape(&dir, &step, &result, &verdict_file(&dir, &step))?;
                     }
                     // The check the pass was logged against is the plan's, not the caller's.
                     parsed = with_evidence(parsed, &dir, &run, &step)?

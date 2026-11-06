@@ -81,10 +81,10 @@ certified the same visible test and the reviewer never ran. 0.3 is the answer to
 measurement: three sw calls per small task, a shorter skill, and a code step that `sw` will not
 certify without a reviewer's verdict, logged after the check and naming every changed file. Its own
 number comes from the same tasks and is published either way. Notes, data and every run's
-verdict: [docs/evals.md](docs/evals.md) and the
+verdict: [docs/evals.md](docs/evals.md) (the 2026-11 pilot notes are listed there) and the
 [Hugging Face dataset](https://huggingface.co/datasets/Folvix/stillwright-evals).
 
-The gate itself is tested: 67 black-box tests drive the binary on Linux, macOS and Windows in
+The gate itself is tested: 235 black-box tests drive the binary on Linux, macOS and Windows in
 CI, including the ways two independent reviews found to get past it before release.
 
 ## Install

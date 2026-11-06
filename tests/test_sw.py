@@ -30,6 +30,10 @@ class SwTestCase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.home = pathlib.Path(self.tmp.name)
         self.env = {**os.environ, "STILLWRIGHT_HOME": self.tmp.name}
+        # Every sw call runs in a neutral folder unless a test says otherwise: a run opened in the
+        # test process's own folder would bind, snapshot and review the real repository.
+        self.default_cwd = self.home / "cwd"
+        self.default_cwd.mkdir()
 
     def evidence(self, text="PASS: checked by hand in a test\n"):
         """A non-empty file a hand-logged pass can point at."""
@@ -38,7 +42,7 @@ class SwTestCase(unittest.TestCase):
         return f"evidence={path}"
 
     def sw(self, *argv, cwd=None):
-        result = subprocess.run([SW, *argv], env=self.env, capture_output=True, text=True, cwd=cwd)
+        result = subprocess.run([SW, *argv], env=self.env, capture_output=True, text=True, cwd=cwd or self.default_cwd)
         if result.returncode != 0:
             raise Failed(result.stderr.strip())
         return result.stdout
@@ -411,7 +415,7 @@ class CertificateTests(SwTestCase):
         subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], cwd=self.work, check=True)
         (self.work / "tests").mkdir()
         (self.work / "tests" / "t.sh").write_text("exit 0\n")
-        self.run = pathlib.Path(self.sw("run", "new", "cert").strip())
+        self.run = pathlib.Path(self.sw("run", "new", "cert", cwd=self.work).strip())
         (self.run / "plan.md").write_text(
             "# Goal: x\n1. a | check: $ sh tests/t.sh\n2. b | check: reviewer reads it\nOutward: none\n"
         )
@@ -428,7 +432,7 @@ class CertificateTests(SwTestCase):
         receipt = self.receipts()[-1]
         self.assertEqual(receipt["cmd"], "sh tests/t.sh")
         self.assertEqual(receipt["exit"], 0)
-        self.assertEqual(len(receipt["tree"]), 40)
+        self.assertTrue(receipt["tree"].startswith("dir:") and len(receipt["tree"]) == 68)
         self.assertEqual(len(receipt["out_sha256"]), 64)
         logs = list((self.run / "checks").glob("1-*.log"))
         self.assertEqual(len(logs), 1)
@@ -462,7 +466,7 @@ class CertificateTests(SwTestCase):
             self.sw("run", "done", "latest", "1", cwd=self.work)
         self.assertIn("no receipt", str(cm.exception))
         self.sw("run", "check", "latest", "1", cwd=self.work)
-        (self.work / "new.txt").write_text("edited after the check\n")
+        (self.work / "new.md").write_text("edited after the check\n")
         with self.assertRaises(Failed) as cm:
             self.sw("run", "done", "latest", "1", cwd=self.work)
         self.assertIn("stale", str(cm.exception))
@@ -499,6 +503,10 @@ class CertificateTests(SwTestCase):
         # an explicit re-freeze is the only way on, and it stays in the log
         self.sw("run", "freeze", "latest", "tests", cwd=self.work)
         self.sw("run", "check", "latest", "1", cwd=self.work)
+        # a changed test file is a change under review: the fresh reviewer's verdict comes first
+        verdict = self.run / "checks" / "step-1-review.md"
+        verdict.write_text("PASS: tests/t.sh was re-frozen on purpose in this test\n")
+        self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={verdict}", cwd=self.work)
         self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
 
     def test_pipes_inside_a_check_are_kept(self):
@@ -539,7 +547,7 @@ class CertificateTests(SwTestCase):
         try:
             with self.assertRaises(Failed) as cm:
                 self.sw("run", "check", "latest", "1", cwd=self.work)
-            self.assertIn("git", str(cm.exception))
+            self.assertIn("cannot read", str(cm.exception))
             self.assertEqual(self.receipts(), [])
         finally:
             locked.chmod(0o644)
@@ -625,7 +633,7 @@ class RewindTests(SwTestCase):
         (self.work / "tests" / "t.sh").write_text("exit 0\n")
         subprocess.run([*self.git, "add", "-A"], cwd=self.work, check=True)
         subprocess.run([*self.git, "commit", "-q", "-m", "init"], cwd=self.work, check=True)
-        self.run = pathlib.Path(self.sw("run", "new", "rew").strip())
+        self.run = pathlib.Path(self.sw("run", "new", "rew", cwd=self.work).strip())
         (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $ sh tests/t.sh\n2. b | check: $ true\n")
 
     def events(self):
@@ -646,12 +654,12 @@ class RewindTests(SwTestCase):
         return self.sw("run", "done", "latest", step, cwd=self.work)
 
     def test_done_leaves_a_snapshot_of_the_tree(self):
-        (self.work / "untracked.txt").write_text("kept\n")
+        (self.work / "untracked.md").write_text("kept\n")
         self.certify("1")
         done = self.events()[-1]
         self.assertEqual(len(done["snapshot"]), 40)
         self.assertEqual(self.refs(), [f"refs/sw/{self.run.name}/step-1"])
-        self.assertIn("untracked.txt", self.tree_files(f"refs/sw/{self.run.name}/step-1"))
+        self.assertIn("untracked.md", self.tree_files(f"refs/sw/{self.run.name}/step-1"))
 
     def test_rewind_restores_the_step_and_keeps_what_it_removed(self):
         self.certify("1")
@@ -689,7 +697,7 @@ class RewindTests(SwTestCase):
 
     def test_rewind_keeps_the_state_folder_inside_the_repo(self):
         self.env["STILLWRIGHT_HOME"] = str(self.work / ".swh")
-        run = pathlib.Path(self.sw("run", "new", "inside").strip())
+        run = pathlib.Path(self.sw("run", "new", "inside", cwd=self.work).strip())
         (run / "plan.md").write_text("# Goal: x\n1. a | check: $ true\n")
         self.certify("1")
         (self.work / "junk.txt").write_text("x\n")
@@ -726,6 +734,8 @@ class RewindTests(SwTestCase):
     def test_snapshot_outside_git_is_refused_but_done_still_works(self):
         plain = pathlib.Path(self.tmp.name) / "plain"
         plain.mkdir()
+        run = pathlib.Path(self.sw("run", "new", "plain", cwd=plain).strip())
+        (run / "plan.md").write_text((self.run / "plan.md").read_text())
         with self.assertRaises(Failed) as cm:
             self.sw("run", "snapshot", "latest", "1", cwd=plain)
         self.assertIn("git", str(cm.exception))
@@ -1465,7 +1475,7 @@ class ReviewPacketTests(SwTestCase):
         (self.work / "tests" / "t.sh").write_text("echo check-output-here; exit 0\n")
         subprocess.run([*self.git, "add", "-A"], cwd=self.work, check=True)
         subprocess.run([*self.git, "commit", "-q", "-m", "init"], cwd=self.work, check=True)
-        self.run = pathlib.Path(self.sw("run", "new", "rev").strip())
+        self.run = pathlib.Path(self.sw("run", "new", "rev", cwd=self.work).strip())
         (self.run / "plan.md").write_text(
             "# Goal: ship the thing\nMust not: touch prod\n"
             "1. a | check: $ sh tests/t.sh\n2. write the post | check: five lines, has the date | after: 1\n"
@@ -1516,6 +1526,8 @@ class ReviewPacketTests(SwTestCase):
         fresh.mkdir()
         subprocess.run([*self.git, "init", "-q"], cwd=fresh, check=True)
         (fresh / "only.md").write_text("brand new\n")
+        run = pathlib.Path(self.sw("run", "new", "fresh", cwd=fresh).strip())
+        (run / "plan.md").write_text((self.run / "plan.md").read_text())
         out = self.sw("run", "review", "latest", "2", cwd=fresh)
         self.assertIn("since an empty repository", out)
         self.assertIn("+brand new", out)
@@ -1523,6 +1535,8 @@ class ReviewPacketTests(SwTestCase):
     def test_packet_outside_git_still_works(self):
         plain = pathlib.Path(self.tmp.name) / "plain"
         plain.mkdir()
+        run = pathlib.Path(self.sw("run", "new", "plain", cwd=plain).strip())
+        (run / "plan.md").write_text((self.run / "plan.md").read_text())
         out = self.sw("run", "review", "latest", "2", cwd=plain)
         self.assertIn("no git repository", out)
         self.assertIn("Check: five lines, has the date", out)
@@ -1542,7 +1556,7 @@ class ReviewHardeningTests(SwTestCase):
         (self.work / "tests" / "t.sh").write_text("echo real-output; exit 0\n")
         subprocess.run([*self.git, "add", "-A"], cwd=self.work, check=True)
         subprocess.run([*self.git, "commit", "-q", "-m", "init"], cwd=self.work, check=True)
-        self.run = pathlib.Path(self.sw("run", "new", "hard").strip())
+        self.run = pathlib.Path(self.sw("run", "new", "hard", cwd=self.work).strip())
         self.plan = "# Goal: g\n1. a | check: $ sh tests/t.sh\n2. b | check: has the date\n3. c | check: $ true\n"
         (self.run / "plan.md").write_text(self.plan)
 
@@ -2617,3 +2631,100 @@ class ReviewRoundThreeTests(SwTestCase):
         sw("run", "new", "inside", "--plan", str(self.plan))
         self.assertIn("certified", sw("run", "prove", "latest", "1"))
         self.assertIn("certified", sw("run", "prove", "latest", "2"))
+
+
+class ReviewRoundFourTests(SwTestCase):
+    """One classifier for the receipt and the review: what the review covers is what the hash binds."""
+
+    def setUp(self):
+        super().setUp()
+        self.git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+        self.repo = pathlib.Path(self.tmp.name) / "repo"
+        (self.repo / "tests" / "fixtures").mkdir(parents=True)
+        (self.repo / "core.py").write_text("C = 1\n")
+        (self.repo / "tests" / "fixtures" / "golden.log").write_text("expected-a\n")
+        (self.repo / "tests" / "test_c.py").write_text("import unittest\nclass T(unittest.TestCase):\n    def test_c(self):\n        pass\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "base"], cwd=self.repo, check=True)
+        self.plan = pathlib.Path(self.tmp.name) / "plan.txt"
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+
+    def open(self, cwd=None):
+        return pathlib.Path(self.sw("run", "new", "r4", "--plan", str(self.plan), cwd=cwd or self.repo).strip())
+
+    def test_a_tracked_fixture_log_is_bound_by_the_receipt_in_git(self):
+        self.open()
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        (self.repo / "tests" / "fixtures" / "golden.log").write_text("BROKEN\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.repo)
+        self.assertIn("stale", str(cm.exception))
+
+    def test_a_tracked_data_jsonl_is_bound_and_reviewed_in_git(self):
+        (self.repo / "data").mkdir()
+        (self.repo / "data" / "rows.jsonl").write_text("{}\n")
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "data"], cwd=self.repo, check=True)
+        self.open()
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        (self.repo / "data" / "rows.jsonl").write_text('{"x":1}\n')
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.repo)
+        self.assertIn("stale", str(cm.exception))
+
+    def test_done_from_another_git_repository_still_binds_the_run_folder(self):
+        run = self.open()
+        other = pathlib.Path(self.tmp.name) / "other"
+        other.mkdir()
+        subprocess.run([*self.git, "init", "-q"], cwd=other, check=True)
+        self.sw("run", "check", "latest", "1", cwd=other)
+        v = run / "checks" / "step-1-review.md"
+        v.parent.mkdir(exist_ok=True)
+        (self.repo / "core.py").write_text("C = 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=other)
+        self.assertIn("stale", str(cm.exception))
+
+    def test_a_gitignored_state_folder_inside_the_repo_does_not_break_check(self):
+        (self.repo / ".gitignore").write_text(".sw/\n")
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "ignore"], cwd=self.repo, check=True)
+        env = {**self.env, "STILLWRIGHT_HOME": str(self.repo / ".sw")}
+        def sw(*argv):
+            r = subprocess.run([SW, *argv], env=env, capture_output=True, text=True, cwd=self.repo)
+            if r.returncode != 0:
+                raise Failed(r.stderr.strip())
+            return r.stdout
+        sw("run", "new", "inside", "--plan", str(self.plan))
+        self.assertIn("certified", sw("run", "prove", "latest", "1"))
+
+    def test_a_forged_startup_event_does_not_reset_a_fresh_baseline(self):
+        self.sw("run", "baseline", cwd=self.repo)
+        (self.repo / "core.py").write_text("C = 2\n")
+        event = json.dumps({"session_id": "x", "cwd": str(self.repo), "hook_event_name": "SessionStart", "source": "startup"})
+        r = subprocess.run([SW, "run", "brief", "--hook"], input=event, env=self.env, capture_output=True, text=True, cwd=self.repo)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.open()
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.repo)
+        self.assertIn("core.py", str(cm.exception))
+
+    def test_tracked_code_under_a_top_level_build_folder_is_reviewed_in_git(self):
+        (self.repo / "build").mkdir()
+        (self.repo / "build" / "webpack.base.conf.js").write_text("module.exports = {}\n")
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "build cfg"], cwd=self.repo, check=True)
+        self.open()
+        (self.repo / "build" / "webpack.base.conf.js").write_text("module.exports = {mode: 'x'}\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.repo)
+        self.assertIn("webpack.base.conf.js", str(cm.exception))
+
+    def test_snapshot_and_rewind_still_work_on_the_run_repository(self):
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\n2. b | check: $ true | after: 1\nOutward: none\n")
+        self.open()
+        self.sw("run", "snapshot", "latest", "1", cwd=self.repo)
+        (self.repo / "core.py").write_text("C = 9\n")
+        self.sw("run", "rewind", "latest", "1", cwd=self.repo)
+        self.assertEqual((self.repo / "core.py").read_text(), "C = 1\n")
