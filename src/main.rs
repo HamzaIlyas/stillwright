@@ -541,9 +541,11 @@ impl Store {
                 .ok()
                 .and_then(|d| fs::canonicalize(d).ok());
             if let Some(here) = here {
-                if let Some(local) = runs.iter().rev().find(|dir| {
-                    run_cwd(dir).is_some_and(|c| here.starts_with(PathBuf::from(c)))
-                }) {
+                if let Some(local) = runs
+                    .iter()
+                    .rev()
+                    .find(|dir| run_cwd(dir).is_some_and(|c| here.starts_with(PathBuf::from(c))))
+                {
                     return Ok(local.clone());
                 }
             }
@@ -878,7 +880,13 @@ fn tree_of_worktree(top: &str, keep_objects: bool) -> Result<String> {
 fn commitless_repos_under(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     if dir.join(".git").exists() {
-        if git(Some(&dir.to_string_lossy()), &[], &["rev-parse", "--verify", "-q", "HEAD"]).is_none() {
+        if git(
+            Some(&dir.to_string_lossy()),
+            &[],
+            &["rev-parse", "--verify", "-q", "HEAD"],
+        )
+        .is_none()
+        {
             found.push(dir.to_path_buf());
         }
         return found;
@@ -890,7 +898,10 @@ fn commitless_repos_under(dir: &Path) -> Vec<PathBuf> {
             if HOST_DIRS_ANYWHERE.contains(&name.as_str()) {
                 continue;
             }
-            if fs::symlink_metadata(&path).map(|m| m.is_dir() && !m.file_type().is_symlink()).unwrap_or(false) {
+            if fs::symlink_metadata(&path)
+                .map(|m| m.is_dir() && !m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
                 found.extend(commitless_repos_under(&path));
             }
         }
@@ -903,13 +914,24 @@ fn stage_tree(top: &str, store: &TempStore) -> Result<String> {
     // An untracked nested repository without a commit makes `git add -A` fail; it is left out of
     // the snapshot (it has nothing git could record anyway).
     let mut add: Vec<String> = vec!["add".into(), "-A".into(), "--".into(), ".".into()];
-    if let Some(dirs) = git(Some(top), &[], &["ls-files", "-o", "--directory", "--exclude-standard", "-z"]) {
-        for rel in dirs.split('\0').map(|r| r.trim_end_matches('/')).filter(|r| !r.is_empty()) {
+    if let Some(dirs) = git(
+        Some(top),
+        &[],
+        &["ls-files", "-o", "--directory", "--exclude-standard", "-z"],
+    ) {
+        for rel in dirs
+            .split('\0')
+            .map(|r| r.trim_end_matches('/'))
+            .filter(|r| !r.is_empty())
+        {
             let path = Path::new(top).join(rel);
             if path.is_dir() {
                 for repo in commitless_repos_under(&path) {
                     if let Ok(r) = repo.strip_prefix(top) {
-                        add.push(format!(":(exclude){}", r.to_string_lossy().replace('\\', "/")));
+                        add.push(format!(
+                            ":(exclude){}",
+                            r.to_string_lossy().replace('\\', "/")
+                        ));
                     }
                 }
             }
@@ -928,7 +950,11 @@ fn stage_tree(top: &str, store: &TempStore) -> Result<String> {
             if let Ok(rel) = state.strip_prefix(&top_real) {
                 let rel = rel.to_string_lossy().replace('\\', "/");
                 if !rel.is_empty() {
-                    let _ = git(Some(top), &envs, &["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", &rel]);
+                    let _ = git(
+                        Some(top),
+                        &envs,
+                        &["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", &rel],
+                    );
                 }
             }
         }
@@ -941,14 +967,19 @@ fn stage_tree(top: &str, store: &TempStore) -> Result<String> {
 fn review_root(run: &Path) -> Result<PathBuf> {
     let opened = match run_cwd(run) {
         Some(c) => PathBuf::from(c),
-        None => std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?,
+        None => std::env::current_dir()
+            .map_err(|e| format!("cannot read the current directory: {e}"))?,
     };
     Ok(git_top_of(&opened).map(PathBuf::from).unwrap_or(opened))
 }
 
 /// `git rev-parse --show-toplevel` for a folder, if it is inside a repository.
 fn git_top_of(dir: &Path) -> Option<String> {
-    git(Some(&dir.to_string_lossy()), &[], &["rev-parse", "--show-toplevel"])
+    git(
+        Some(&dir.to_string_lossy()),
+        &[],
+        &["rev-parse", "--show-toplevel"],
+    )
 }
 
 /// Hash of the work for a run: a content hash (`dir:<sha256>`) over exactly the files the review
@@ -956,7 +987,8 @@ fn git_top_of(dir: &Path) -> Option<String> {
 /// sw refuses from a sibling folder, so what the hash binds is always what the reviewer sees.
 fn worktree_hash_for(run: &Path) -> Result<String> {
     let root = review_root(run)?;
-    let here = std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
+    let here =
+        std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
     let here_c = fs::canonicalize(&here).unwrap_or_else(|_| here.clone());
     let root_c = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
     if !(here_c.starts_with(&root_c) || root_c.starts_with(&here_c)) {
@@ -970,9 +1002,23 @@ fn worktree_hash_for(run: &Path) -> Result<String> {
 
 /// Folders hosts and tools write anywhere in a tree: never hashed, never source.
 const HOST_DIRS_ANYWHERE: &[&str] = &[
-    ".git", ".claude", ".codex", ".gemini", ".cursor", ".idea", ".vscode", ".cache",
-    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv", "node_modules",
-    "__pycache__", ".DS_Store",
+    ".git",
+    ".claude",
+    ".codex",
+    ".gemini",
+    ".cursor",
+    ".idea",
+    ".vscode",
+    ".cache",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".DS_Store",
 ];
 /// Build output at the top of a tree. Deeper down (`src/build/`) a folder of that name is code.
 const HOST_DIRS_TOP: &[&str] = &["target", "dist", "build", "htmlcov", "coverage"];
@@ -1016,13 +1062,29 @@ fn walk_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
     let state = state_root().ok().and_then(|s| fs::canonicalize(s).ok());
     if git(Some(&root_s), &[], &["rev-parse", "--show-toplevel"]).is_some() {
         let tracked = git(Some(&root_s), &[], &["ls-files", "-z"]);
-        let untracked = git(Some(&root_s), &[], &["ls-files", "-o", "--exclude-standard", "-z"]);
+        let untracked = git(
+            Some(&root_s),
+            &[],
+            &["ls-files", "-o", "--exclude-standard", "-z"],
+        );
         if let (Some(tracked), Some(untracked)) = (tracked, untracked) {
             let state_rel = state.as_ref().and_then(|st| {
-                fs::canonicalize(root).ok().and_then(|r| st.strip_prefix(r).ok().map(|p| p.to_string_lossy().replace('\\', "/")))
+                fs::canonicalize(root).ok().and_then(|r| {
+                    st.strip_prefix(r)
+                        .ok()
+                        .map(|p| p.to_string_lossy().replace('\\', "/"))
+                })
             });
-            let in_state = |rel: &str| state_rel.as_deref().is_some_and(|sr| rel == sr || rel.starts_with(&format!("{sr}/")));
-            let is_link = |path: &Path| fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+            let in_state = |rel: &str| {
+                state_rel
+                    .as_deref()
+                    .is_some_and(|sr| rel == sr || rel.starts_with(&format!("{sr}/")))
+            };
+            let is_link = |path: &Path| {
+                fs::symlink_metadata(path)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+            };
             // A folder with its own git (a submodule, a nested repository) is listed by its own git,
             // tracked and untracked alike, with its own ignores; any other folder is walked.
             let nested = |rel: &str, path: &Path, out: &mut Vec<(String, PathBuf)>| {
@@ -1082,7 +1144,9 @@ fn walk_plain(root: &Path, dir: &Path, state: Option<&Path>, out: &mut Vec<(Stri
     for entry in entries.flatten() {
         let path = entry.path();
         let name = file_name(&path);
-        if HOST_DIRS_ANYWHERE.contains(&name.as_str()) || (dir == root && HOST_DIRS_TOP.contains(&name.as_str())) {
+        if HOST_DIRS_ANYWHERE.contains(&name.as_str())
+            || (dir == root && HOST_DIRS_TOP.contains(&name.as_str()))
+        {
             continue;
         }
         let Ok(meta) = fs::symlink_metadata(&path) else {
@@ -1120,7 +1184,10 @@ fn file_digest(path: &Path) -> std::result::Result<String, String> {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
-            Ok(format!("{:x}", Sha256::digest(format!("size:{} mtime:{mtime}", m.len()).as_bytes())))
+            Ok(format!(
+                "{:x}",
+                Sha256::digest(format!("size:{} mtime:{mtime}", m.len()).as_bytes())
+            ))
         }
         _ => fs::read(path)
             .map(|bytes| format!("{:x}", Sha256::digest(&bytes)))
@@ -1163,7 +1230,10 @@ const START_MANIFEST: &str = "files-start.json";
 const MANIFEST_MAX: usize = 20_000;
 
 /// The start manifest for `cwd`: (status, files). Never fails: a huge folder gives none.
-fn start_manifest(store: &Store, cwd: &Path) -> (String, Option<BTreeMap<String, String>>, Option<String>) {
+fn start_manifest(
+    store: &Store,
+    cwd: &Path,
+) -> (String, Option<BTreeMap<String, String>>, Option<String>) {
     if let Ok(Some((ts, files, commit))) = fresh_baseline(store, cwd) {
         return (format!("baseline {ts}"), Some(files), commit);
     }
@@ -1183,7 +1253,10 @@ fn baseline_path(store: &Store, cwd: &Path) -> PathBuf {
         .map(|c| c.to_string_lossy().into_owned())
         .unwrap_or_else(|_| cwd.to_string_lossy().into_owned());
     let digest = format!("{:x}", Sha256::digest(key.as_bytes()));
-    store.root.join("baselines").join(format!("{}.json", &digest[..16]))
+    store
+        .root
+        .join("baselines")
+        .join(format!("{}.json", &digest[..16]))
 }
 
 /// A snapshot commit of `top` under `refs/sw/baseline/<key>`: the diff base of a run opened on
@@ -1203,7 +1276,11 @@ fn baseline_commit(top: &str, key: &str) -> Option<String> {
         ("GIT_COMMITTER_EMAIL", mail),
     ];
     let commit = git(Some(top), &identity, &args)?;
-    git(Some(top), &[], &["update-ref", &format!("refs/sw/baseline/{key}"), &commit])?;
+    git(
+        Some(top),
+        &[],
+        &["update-ref", &format!("refs/sw/baseline/{key}"), &commit],
+    )?;
     Some(commit)
 }
 
@@ -1227,13 +1304,19 @@ fn write_baseline(store: &Store, cwd: &Path) -> Result<usize> {
         "files": manifest,
         "commit": commit,
     });
-    fs::write(&path, serde_json::to_string(&body).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    fs::write(
+        &path,
+        serde_json::to_string(&body).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(count)
 }
 
-/// The baseline for `cwd` if one was recorded within BASELINE_HOURS: (when, files, snapshot commit).
-fn fresh_baseline(store: &Store, cwd: &Path) -> Result<Option<(String, BTreeMap<String, String>, Option<String>)>> {
+/// A recorded baseline: when it was taken, the files it listed, and the snapshot commit if any.
+type Baseline = (String, BTreeMap<String, String>, Option<String>);
+
+/// The baseline for `cwd` if one was recorded within BASELINE_HOURS.
+fn fresh_baseline(store: &Store, cwd: &Path) -> Result<Option<Baseline>> {
     let path = baseline_path(store, cwd);
     let Ok(text) = fs::read_to_string(&path) else {
         return Ok(None);
@@ -1253,7 +1336,10 @@ fn fresh_baseline(store: &Store, cwd: &Path) -> Result<Option<(String, BTreeMap<
         .get("files")
         .and_then(|f| serde_json::from_value(f.clone()).ok())
         .unwrap_or_default();
-    let commit = body.get("commit").and_then(|c| c.as_str()).map(str::to_string);
+    let commit = body
+        .get("commit")
+        .and_then(|c| c.as_str())
+        .map(str::to_string);
     Ok(Some((ts, files, commit)))
 }
 
@@ -1295,7 +1381,10 @@ fn review_files(run: &Path, step: &str) -> Result<Option<Vec<String>>> {
             .iter()
             .take(first_receipt)
             .rev()
-            .find(|e| e.get("certified") == Some(&serde_json::Value::Bool(true)) && e.contains_key("manifest"))
+            .find(|e| {
+                e.get("certified") == Some(&serde_json::Value::Bool(true))
+                    && e.contains_key("manifest")
+            })
             .and_then(|e| e.get("manifest").map(value_str))
             .map(|name| run.join(name))
             .filter(|p| p.exists());
@@ -1352,7 +1441,10 @@ fn needs_review_path(rel: &str) -> bool {
     }
     if lower.ends_with(".txt") {
         let in_docs = segs.iter().any(|seg| matches!(*seg, "docs" | "doc"));
-        let doc_name = name.starts_with("readme") || name.starts_with("changelog") || name.starts_with("license") || name.starts_with("notice");
+        let doc_name = name.starts_with("readme")
+            || name.starts_with("changelog")
+            || name.starts_with("license")
+            || name.starts_with("notice");
         return !(in_docs || doc_name);
     }
     true
@@ -1413,7 +1505,8 @@ fn names_file(text: &str, base: &str) -> bool {
         let mut after = rest.chars();
         let next = after.next();
         let next2 = after.next();
-        let ends_sentence = matches!(next, Some('.' | ',' | ':' | ';')) && !next2.is_some_and(is_name_char);
+        let ends_sentence =
+            matches!(next, Some('.' | ',' | ':' | ';')) && !next2.is_some_and(is_name_char);
         !before.is_some_and(is_name_char) && (!next.is_some_and(is_name_char) || ends_sentence)
     })
 }
@@ -1509,7 +1602,8 @@ fn free_label(top: &str, run: &Path, base: &str) -> String {
 
 fn run_snapshot(run: &Path, step: &str) -> Result<()> {
     let root = review_root(run)?;
-    let top = git_top_of(&root).ok_or("a snapshot needs a git repository where the run was opened")?;
+    let top =
+        git_top_of(&root).ok_or("a snapshot needs a git repository where the run was opened")?;
     note_plan(run)?;
     // The step's review answers against this moment, but only when nothing is already waiting
     // for review: a snapshot taken after the work must not take the work out of the review.
@@ -1549,7 +1643,8 @@ fn run_snapshot(run: &Path, step: &str) -> Result<()> {
 /// Restore the files of a step's snapshot. Files that exist now but not in the snapshot are
 /// removed unless git ignores them; the state being replaced is snapshotted first.
 fn run_rewind(run: &Path, step: &str) -> Result<()> {
-    let top = git_top_of(&review_root(run)?).ok_or("a rewind needs a git repository where the run was opened")?;
+    let top = git_top_of(&review_root(run)?)
+        .ok_or("a rewind needs a git repository where the run was opened")?;
     let target = snapshot_ref(run, &format!("step-{step}"));
     let commit =
         git(Some(&top), &[], &["rev-parse", "--verify", "-q", &target]).ok_or_else(|| {
@@ -2453,20 +2548,28 @@ fn print_changed_sources(run: &Path, step: &str, token: &str) -> Result<()> {
          types nobody documented, limits nobody set, style) is a note under the PASS, never a FAIL: judge \
          the contract, not what you would add. Name every file in the verdict."
     );
-    let cwd = review_root(run).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let cwd = review_root(run)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
     for rel in &changed {
         if rel.ends_with(" (removed)") {
             continue;
         }
         let path = Path::new(&cwd).join(rel);
         match fs::read_to_string(&path) {
-            Ok(text) if text.lines().count() <= PACKET_LINES / 2 && text.len() <= PACKET_FILE_BYTES => {
+            Ok(text)
+                if text.lines().count() <= PACKET_LINES / 2 && text.len() <= PACKET_FILE_BYTES =>
+            {
                 println!("\n--- {rel}, as it is now ---");
                 println!("{}", fence_begins(token));
                 println!("{}", clip_lines(text.trim_end(), PACKET_LINES / 2));
                 println!("{}", fence_ends(token));
             }
-            Ok(text) => println!("{rel}: {} lines, {} bytes, open it", text.lines().count(), text.len()),
+            Ok(text) => println!(
+                "{rel}: {} lines, {} bytes, open it",
+                text.lines().count(),
+                text.len()
+            ),
             Err(_) => println!("{rel}: not a text file, open it"),
         }
     }
@@ -3146,7 +3249,11 @@ fn enable_in_settings(path: &Path) -> Result<bool> {
         let hooks = hooks.as_object_mut().expect("checked");
         for (event, matcher, command) in [
             ("PreToolUse", "Bash", "sw gate --hook"),
-            ("SessionStart", "startup|resume|compact", "sw run brief --hook"),
+            (
+                "SessionStart",
+                "startup|resume|compact",
+                "sw run brief --hook",
+            ),
             // The Stop verdict travels as JSON on stdout, so the exit code carries nothing; `exit 0`
             // keeps an older sw without `run stop` (exit 2 on an unknown subcommand) from holding a turn.
             ("Stop", "", "sw run stop --hook; exit 0"),
@@ -3765,7 +3872,9 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                 Some("-") => {
                     use std::io::IsTerminal;
                     if std::io::stdin().is_terminal() {
-                        return Err("--plan - reads the plan from stdin; pipe it in or give a file".into());
+                        return Err(
+                            "--plan - reads the plan from stdin; pipe it in or give a file".into(),
+                        );
                     }
                     let mut text = String::new();
                     std::io::stdin()
@@ -3774,7 +3883,8 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                     Some(text)
                 }
                 Some(path) => Some(
-                    fs::read_to_string(path).map_err(|e| format!("cannot read the plan {path}: {e}"))?,
+                    fs::read_to_string(path)
+                        .map_err(|e| format!("cannot read the plan {path}: {e}"))?,
                 ),
             };
             if let Some(text) = &plan_text {
@@ -3793,7 +3903,9 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             let (manifest_status, manifest, baseline_commit) = if cwd.is_empty() {
                 ("unavailable: no current directory".to_string(), None, None)
             } else {
-                let root = git_top_of(Path::new(&cwd)).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(&cwd));
+                let root = git_top_of(Path::new(&cwd))
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from(&cwd));
                 start_manifest(store, &root)
             };
             let goal_id = match goal.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
@@ -3869,7 +3981,12 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             if let Some(top) = git_top_of(Path::new(&cwd)) {
                 let had_baseline = baseline_commit.is_some();
                 let from_baseline = baseline_commit.filter(|c| {
-                    git(Some(&top), &[], &["rev-parse", "--verify", "-q", &format!("{c}^{{commit}}")]).is_some()
+                    git(
+                        Some(&top),
+                        &[],
+                        &["rev-parse", "--verify", "-q", &format!("{c}^{{commit}}")],
+                    )
+                    .is_some()
                 });
                 if had_baseline && from_baseline.is_none() {
                     eprintln!("warning: the session baseline's snapshot commit is gone; this run's diff starts at a snapshot taken now, its review list at the baseline");
@@ -3879,9 +3996,13 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                     // baselines, and gc must not take this commit with it.
                     Some(c) => {
                         let label = free_label(&top, &dir, "start");
-                        git(Some(&top), &[], &["update-ref", &snapshot_ref(&dir, &label), &c])
-                            .map(|_| c.clone())
-                            .ok_or_else(|| format!("cannot pin the baseline snapshot {}", short(&c)))
+                        git(
+                            Some(&top),
+                            &[],
+                            &["update-ref", &snapshot_ref(&dir, &label), &c],
+                        )
+                        .map(|_| c.clone())
+                        .ok_or_else(|| format!("cannot pin the baseline snapshot {}", short(&c)))
                     }
                     None => {
                         let label = free_label(&top, &dir, "start");
@@ -3928,7 +4049,10 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             if p.total() == 0 {
                 return Err(format!("run {name} has no plan.md; nothing to finish"));
             }
-            if log_events(&dir)?.iter().any(|e| event_is(e, "event", "finish")) {
+            if log_events(&dir)?
+                .iter()
+                .any(|e| event_is(e, "event", "finish"))
+            {
                 return Err(format!("run {name} is already finished"));
             }
             let goal_id = log_events(&dir)?
@@ -3966,7 +4090,13 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                 plan_sha256: plan_hash(&dir),
             });
             store.save("inbox.json", &cards)?;
-            append_event(&dir, &[("event".into(), "finish".into()), ("card".into(), id.to_string())])?;
+            append_event(
+                &dir,
+                &[
+                    ("event".into(), "finish".into()),
+                    ("card".into(), id.to_string()),
+                ],
+            )?;
             if let Ok(root) = review_root(&dir) {
                 let _ = write_baseline(store, &root);
             }
@@ -4016,7 +4146,9 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                 let check = plan_step_check(&plan, &step);
                 let is_command = check.as_deref().and_then(command_check).is_some();
                 if is_command {
-                    let expected = fs::canonicalize(verdict_file(&dir, &step)).ok().map(plain_path);
+                    let expected = fs::canonicalize(verdict_file(&dir, &step))
+                        .ok()
+                        .map(plain_path);
                     let given = value("evidence")
                         .and_then(|v| fs::canonicalize(v.trim()).ok())
                         .map(plain_path);
@@ -4048,9 +4180,12 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                     require_consent(store, &dir, &step)?;
                     // Code or tests changed under a prose check: the pass is the reviewer's verdict,
                     // in the file the packet names, shaped like any other.
-                    let must_review = !matches!(review_files(&dir, &step)?, Some(ref v) if v.is_empty());
+                    let must_review =
+                        !matches!(review_files(&dir, &step)?, Some(ref v) if v.is_empty());
                     if must_review {
-                        let expected = fs::canonicalize(verdict_file(&dir, &step)).ok().map(plain_path);
+                        let expected = fs::canonicalize(verdict_file(&dir, &step))
+                            .ok()
+                            .map(plain_path);
                         let given = value("evidence")
                             .and_then(|v| fs::canonicalize(v.trim()).ok())
                             .map(plain_path);
