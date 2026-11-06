@@ -58,7 +58,7 @@ small model that sees the packet and nothing else, so it costs cents:
 
 When a command can't decide it, run `sw run review latest N` and give the reviewer that
 packet and nothing else: it holds the goal, the must-nots, the step and its check, the diff
-since the snapshot that opened the step (new files included) and the latest check output, and it leaves out
+since the step's review base (its snapshot, the step certified before it started, or the run's start; new files included) and the latest check output, and it leaves out
 what the worker said. The packet ends with the brief ("Start from FAIL. Pass only what the
 changes and the output prove; list each requirement of the check as pass or fail with the
 evidence") and

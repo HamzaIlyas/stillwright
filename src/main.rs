@@ -873,9 +873,50 @@ fn tree_of_worktree(top: &str, keep_objects: bool) -> Result<String> {
 }
 
 /// Stage the working tree into the store's index and write it as a tree object.
+/// Nested repositories under an untracked folder that have no commit yet (`git add -A` cannot
+/// record them and fails on them).
+fn commitless_repos_under(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    if dir.join(".git").exists() {
+        if git(Some(&dir.to_string_lossy()), &[], &["rev-parse", "--verify", "-q", "HEAD"]).is_none() {
+            found.push(dir.to_path_buf());
+        }
+        return found;
+    }
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = file_name(&path);
+            if HOST_DIRS_ANYWHERE.contains(&name.as_str()) {
+                continue;
+            }
+            if fs::symlink_metadata(&path).map(|m| m.is_dir() && !m.file_type().is_symlink()).unwrap_or(false) {
+                found.extend(commitless_repos_under(&path));
+            }
+        }
+    }
+    found
+}
+
 fn stage_tree(top: &str, store: &TempStore) -> Result<String> {
     let envs = store.envs();
-    git(Some(top), &envs, &["add", "-A", "--", "."]).ok_or_else(|| {
+    // An untracked nested repository without a commit makes `git add -A` fail; it is left out of
+    // the snapshot (it has nothing git could record anyway).
+    let mut add: Vec<String> = vec!["add".into(), "-A".into(), "--".into(), ".".into()];
+    if let Some(dirs) = git(Some(top), &[], &["ls-files", "-o", "--directory", "--exclude-standard", "-z"]) {
+        for rel in dirs.split('\0').map(|r| r.trim_end_matches('/')).filter(|r| !r.is_empty()) {
+            let path = Path::new(top).join(rel);
+            if path.is_dir() {
+                for repo in commitless_repos_under(&path) {
+                    if let Ok(r) = repo.strip_prefix(top) {
+                        add.push(format!(":(exclude){}", r.to_string_lossy().replace('\\', "/")));
+                    }
+                }
+            }
+        }
+    }
+    let add_args: Vec<&str> = add.iter().map(String::as_str).collect();
+    git(Some(top), &envs, &add_args).ok_or_else(|| {
         format!(
             "git could not read the working tree at {top} (`git add -A` failed: an unreadable file, permissions, or safe.directory?)"
         )
@@ -974,52 +1015,52 @@ fn walk_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
     let root_s = root.to_string_lossy().into_owned();
     let state = state_root().ok().and_then(|s| fs::canonicalize(s).ok());
     if git(Some(&root_s), &[], &["rev-parse", "--show-toplevel"]).is_some() {
-        let tracked = git(Some(&root_s), &[], &["ls-files", "-z", "--recurse-submodules"])
-            .or_else(|| git(Some(&root_s), &[], &["ls-files", "-z"]));
+        let tracked = git(Some(&root_s), &[], &["ls-files", "-z"]);
         let untracked = git(Some(&root_s), &[], &["ls-files", "-o", "--exclude-standard", "-z"]);
         if let (Some(tracked), Some(untracked)) = (tracked, untracked) {
             let state_rel = state.as_ref().and_then(|st| {
                 fs::canonicalize(root).ok().and_then(|r| st.strip_prefix(r).ok().map(|p| p.to_string_lossy().replace('\\', "/")))
             });
             let in_state = |rel: &str| state_rel.as_deref().is_some_and(|sr| rel == sr || rel.starts_with(&format!("{sr}/")));
+            let is_link = |path: &Path| fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+            // A folder with its own git (a submodule, a nested repository) is listed by its own git,
+            // tracked and untracked alike, with its own ignores; any other folder is walked.
+            let nested = |rel: &str, path: &Path, out: &mut Vec<(String, PathBuf)>| {
+                if path.join(".git").exists() {
+                    if let Ok(inner) = walk_files(path) {
+                        for (sub_rel, sub_path) in inner {
+                            out.push((format!("{rel}/{sub_rel}"), sub_path));
+                        }
+                    }
+                } else {
+                    walk_plain(root, path, state.as_deref(), out);
+                }
+            };
             // Tracked files are the work, whatever they are called; a tracked log is a fixture.
-            // Submodule files come with --recurse-submodules; a tracked symlink to a folder is not
-            // followed (git tracks the link, not the folder).
+            // A tracked folder is a submodule; a tracked symlink to a folder is not followed.
             for rel in tracked.split('\0').filter(|r| !r.is_empty()) {
                 let path = root.join(rel);
                 if in_state(rel) || rel.split('/').any(|seg| seg == ".git") {
                     continue;
                 }
-                let is_link = fs::symlink_metadata(&path).map(|m| m.file_type().is_symlink()).unwrap_or(false);
                 if path.is_file() {
                     files.push((rel.to_string(), path));
-                } else if path.is_dir() && !is_link {
-                    // An older git without --recurse-submodules: walk the submodule.
-                    let mut inner = Vec::new();
-                    walk_plain(&path, &path, state.as_deref(), &mut inner);
-                    for (sub_rel, sub_path) in inner {
-                        files.push((format!("{rel}/{sub_rel}"), sub_path));
-                    }
+                } else if path.is_dir() && !is_link(&path) {
+                    nested(rel, &path, &mut files);
                 }
             }
             // Untracked files pass the noise filter: hosts and tools write logs, caches and
-            // settings during any run, and none of that is the work. An untracked folder is a
-            // nested repository, walked like a plain folder.
+            // settings during any run, and none of that is the work.
             for rel in untracked.split('\0').filter(|r| !r.is_empty()) {
                 let rel = rel.trim_end_matches('/');
                 let path = root.join(rel);
                 if in_state(rel) || noise_path(rel, true) {
                     continue;
                 }
-                let is_link = fs::symlink_metadata(&path).map(|m| m.file_type().is_symlink()).unwrap_or(false);
                 if path.is_file() {
                     files.push((rel.to_string(), path));
-                } else if path.is_dir() && !is_link {
-                    let mut inner = Vec::new();
-                    walk_plain(&path, &path, state.as_deref(), &mut inner);
-                    for (sub_rel, sub_path) in inner {
-                        files.push((format!("{rel}/{sub_rel}"), sub_path));
-                    }
+                } else if path.is_dir() && !is_link(&path) {
+                    nested(rel, &path, &mut files);
                 }
             }
             files.sort();
@@ -1114,8 +1155,9 @@ fn dir_manifest(root: &Path) -> Result<BTreeMap<String, String>> {
 }
 
 /// The manifests a run keeps: what the folder held when the run started (`files-start.json`, a
-/// session baseline when one is fresh) and after the last certified step (`files-certified.json`).
-/// A step's review covers what changed since the later of the two. Above MANIFEST_MAX files the
+/// session baseline when one is fresh), at a step's snapshot (`files-snapshot-N.json`, when it
+/// moved the base) and at each certificate (`files-certified-N.json`). A step's review covers what
+/// changed since the newest of those that came before its first check. Above MANIFEST_MAX files the
 /// manifest is not taken and every command step needs the review, since nothing can say what changed.
 const START_MANIFEST: &str = "files-start.json";
 const MANIFEST_MAX: usize = 20_000;
@@ -2170,7 +2212,6 @@ fn clip_lines(text: &str, max: usize) -> String {
 /// The base a reviewer should diff against: the snapshot taken before this step
 /// (`sw run snapshot`), else the snapshot of the newest certified step before it.
 fn review_base(top: &str, run: &Path, step: &str) -> Option<(String, String)> {
-    let this: u64 = step.parse().ok()?;
     let events = log_events(run).ok()?;
     let exists = |commit: &str| {
         git(
@@ -2200,16 +2241,31 @@ fn review_base(top: &str, run: &Path, step: &str) -> Option<(String, String)> {
     if let Some(commit) = before {
         return Some((format!("the snapshot before step {step}"), commit));
     }
+    // The same base the review list uses: the newest step certified before this step's first
+    // receipt, else the snapshot taken when the run was opened.
+    let first_receipt = events
+        .iter()
+        .position(|e| event_is(e, "event", "receipt") && event_is(e, "step", step))
+        .unwrap_or(events.len());
+    let certified = events
+        .iter()
+        .take(first_receipt)
+        .rev()
+        .filter(|e| e.get("certified") == Some(&serde_json::Value::Bool(true)))
+        .find_map(|e| {
+            let k = e.get("step").map(value_str)?;
+            let commit = e.get("snapshot").map(value_str)?;
+            exists(&commit).then_some((format!("step {k}"), commit))
+        });
+    if certified.is_some() {
+        return certified;
+    }
     events
         .iter()
-        .filter(|e| e.get("certified") == Some(&serde_json::Value::Bool(true)))
-        .filter_map(|e| {
-            let k: u64 = e.get("step").map(value_str)?.parse().ok()?;
-            let commit = e.get("snapshot").map(value_str)?;
-            (k < this && exists(&commit)).then_some((k, commit))
-        })
-        .max_by_key(|(k, _)| *k)
-        .map(|(k, commit)| (format!("step {k}"), commit))
+        .find(|e| event_is(e, "event", "start-snapshot"))
+        .and_then(|e| e.get("commit").map(value_str))
+        .filter(|c| exists(c))
+        .map(|c| ("the start of the run".to_string(), c))
 }
 
 /// Paths in a diff that are nested repositories: their own changes are not in the diff.
@@ -3775,7 +3831,7 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                 &dir,
                 &[
                     ("event".into(), "start".into()),
-                    ("cwd".into(), cwd),
+                    ("cwd".into(), cwd.clone()),
                     ("goal".into(), goal_id),
                     ("manifest".into(), manifest_status),
                 ],
@@ -3786,6 +3842,13 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             }
             if !freeze.is_empty() {
                 freeze_paths(&dir, &freeze)?;
+            }
+            // Inside git, a snapshot of the tree as the run starts: the first review's diff starts
+            // here, even when the worker commits along the way. Quiet when git cannot (no harm).
+            if let Some(top) = git_top_of(Path::new(&cwd)) {
+                if let Ok(commit) = take_snapshot(&top, &dir, "start", "sw snapshot at run start") {
+                    append_event(&dir, &[("event".into(), "start-snapshot".into()), ("commit".into(), commit)])?;
+                }
             }
             println!("{}", dir.display());
         }
