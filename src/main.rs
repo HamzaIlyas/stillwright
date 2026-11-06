@@ -919,12 +919,13 @@ fn worktree_hash_for(run: &Path) -> Result<String> {
     let here = std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
     let here_c = fs::canonicalize(&here).unwrap_or_else(|_| here.clone());
     let root_c = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
-    let root_hash = dir_hash(&root)?;
-    if here_c.starts_with(&root_c) || root_c.starts_with(&here_c) {
-        return Ok(format!("dir:{root_hash}"));
+    if !(here_c.starts_with(&root_c) || root_c.starts_with(&here_c)) {
+        return Err(format!(
+            "this run was opened in {}; run sw from that folder, below it or above it, so the receipt binds what the review covers",
+            root.display()
+        ));
     }
-    let here_hash = dir_hash(&here)?;
-    Ok(format!("dir:{:x}", Sha256::digest(format!("{root_hash}+{here_hash}").as_bytes())))
+    Ok(format!("dir:{}", dir_hash(&root)?))
 }
 
 /// Folders hosts and tools write anywhere in a tree: never hashed, never source.
@@ -982,10 +983,20 @@ fn walk_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
             });
             let in_state = |rel: &str| state_rel.as_deref().is_some_and(|sr| rel == sr || rel.starts_with(&format!("{sr}/")));
             // Tracked files are the work, whatever they are called; a tracked log is a fixture.
+            // A tracked folder is a submodule: its files are walked like a plain folder.
             for rel in tracked.split('\0').filter(|r| !r.is_empty()) {
                 let path = root.join(rel);
-                if path.is_file() && !in_state(rel) && !rel.split('/').any(|seg| seg == ".git") {
+                if in_state(rel) || rel.split('/').any(|seg| seg == ".git") {
+                    continue;
+                }
+                if path.is_file() {
                     files.push((rel.to_string(), path));
+                } else if path.is_dir() {
+                    let mut inner = Vec::new();
+                    walk_plain(&path, &path, state.as_deref(), &mut inner);
+                    for (sub_rel, sub_path) in inner {
+                        files.push((format!("{rel}/{sub_rel}"), sub_path));
+                    }
                 }
             }
             // Untracked files pass the noise filter: hosts and tools write logs, caches and
@@ -1001,40 +1012,45 @@ fn walk_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
             return Ok(files);
         }
     }
-    fn walk(root: &Path, dir: &Path, state: Option<&Path>, out: &mut Vec<(String, PathBuf)>) {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return;
+    walk_plain(root, root, state.as_deref(), &mut files);
+    files.sort();
+    Ok(files)
+}
+
+/// The plain walk: host folders skipped, the state folder skipped, a symlink to a file followed
+/// (its content is the work), a symlink to a folder not (it can loop).
+fn walk_plain(root: &Path, dir: &Path, state: Option<&Path>, out: &mut Vec<(String, PathBuf)>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = file_name(&path);
+        if HOST_DIRS_ANYWHERE.contains(&name.as_str()) || (dir == root && HOST_DIRS_TOP.contains(&name.as_str())) {
+            continue;
+        }
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = file_name(&path);
-            if HOST_DIRS_ANYWHERE.contains(&name.as_str()) || (dir == root && HOST_DIRS_TOP.contains(&name.as_str())) {
-                continue;
-            }
-            let Ok(meta) = fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if meta.file_type().is_symlink() {
-                continue;
-            }
-            if meta.is_dir() {
-                if let Some(state) = state {
-                    if fs::canonicalize(&path).ok().as_deref() == Some(state) {
-                        continue;
-                    }
+        let is_file = if meta.file_type().is_symlink() {
+            fs::metadata(&path).map(|m| m.is_file()).unwrap_or(false)
+        } else {
+            meta.is_file()
+        };
+        if meta.is_dir() {
+            if let Some(state) = state {
+                if fs::canonicalize(&path).ok().as_deref() == Some(state) {
+                    continue;
                 }
-                walk(root, &path, state, out);
-            } else if meta.is_file() {
-                let rel = rel_path(root, &path);
-                if !is_noise_path(&rel) {
-                    out.push((rel, path));
-                }
+            }
+            walk_plain(root, &path, state, out);
+        } else if is_file {
+            let rel = rel_path(root, &path);
+            if !is_noise_path(&rel) {
+                out.push((rel, path));
             }
         }
     }
-    walk(root, root, state.as_deref(), &mut files);
-    files.sort();
-    Ok(files)
 }
 
 /// sha256 of a file's content, or of its length and modification time when it is large; an
@@ -1235,9 +1251,9 @@ fn needs_review_path(rel: &str, in_git: bool) -> bool {
         ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".pdf", ".woff", ".woff2", ".ttf",
         ".otf", ".mp4", ".mp3", ".wav", ".zip", ".gz", ".tar", ".whl", ".jar",
     ];
-    if noise_path(rel, in_git) {
-        return false;
-    }
+    // The manifests hold bound files only (`walk_files` already left noise out), so everything
+    // here is the work; git's tracked files are the work whatever they are called.
+    let _ = in_git;
     if is_test_path(rel) {
         return true;
     }
@@ -1408,8 +1424,13 @@ fn run_snapshot(run: &Path, step: &str) -> Result<()> {
     let root = review_root(run)?;
     let top = git_top_of(&root).ok_or("a snapshot needs a git repository where the run was opened")?;
     note_plan(run)?;
-    // The step's review answers against this moment, not the run's start.
-    if let Ok(m) = dir_manifest(&root) {
+    // The step's review answers against this moment, but only when nothing is already waiting
+    // for review: a snapshot taken after the work must not take the work out of the review.
+    let pending = !matches!(review_files(run, step)?, Some(ref v) if v.is_empty());
+    let failed = matches!(review_verdict(run, step)?, Some((ref v, _, _)) if v == "fail");
+    if pending || failed {
+        eprintln!("note: files changed since the last review base, so this snapshot does not move the review base for step {step}");
+    } else if let Ok(m) = dir_manifest(&root) {
         if let Ok(text) = serde_json::to_string(&m) {
             let _ = fs::write(snapshot_manifest(run, step), text);
         }
@@ -1867,9 +1888,11 @@ fn run_done(store: &Store, run: &Path, step: &str) -> Result<()> {
     }
     let name = file_name(run);
     let verdict = verdict_file(run, step);
+    let last_fail = matches!(review_verdict(run, step)?, Some((ref v, _, _)) if v == "fail");
     let needs = match review_files(run, step)? {
         None => Some("the run could not record what this folder held when it started, so nothing can say which files this step changed".to_string()),
         Some(list) if !list.is_empty() => Some(format!("{} changed since the run started (or the last certified step)", list.join(", "))),
+        Some(_) if last_fail => Some("the reviewer failed this step and no later verdict passed it".to_string()),
         Some(_) => None,
     };
     if let Some(why) = needs {

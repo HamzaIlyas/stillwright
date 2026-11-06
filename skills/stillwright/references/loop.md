@@ -13,8 +13,9 @@ The short form is in SKILL.md. This is the detail a long or unusual run needs.
 - `sw run brief` prints goal, must-nots and next step; the plugin runs it after every context
   compaction. Editing plan.md after work started is noticed once and dated in the log.
 - The inbox refuses a fourth open question per run: ask early, ask right.
-- In a git repository `sw run snapshot latest N` saves the tree before a step and `sw run
-  rewind latest N` restores it; `sw run done` snapshots on its own. Outside git the receipt
+- In a git repository `sw run snapshot latest N` saves the tree before a step (and, when nothing
+  is waiting for review, scopes that step's review to what follows) and `sw run rewind latest N`
+  restores it; `sw run done` snapshots on its own. Outside git the receipt
   binds a hash of the folder's files instead; rewind is unavailable.
 
 ## Routing and cost
@@ -41,7 +42,8 @@ The short form is in SKILL.md. This is the detail a long or unusual run needs.
   step), certification needs the reviewer's verdict in `checks/step-N-review.md`, logged with
   `sw run log latest step=N result=pass|fail evidence=<that file>` after the check it certifies;
   a later change means a new check and a new review. The check command's wording does not matter:
-  the agent writes it. Logs, transcripts and host folders are neither hashed nor source. The verdict
+  the agent writes it. Untracked logs, transcripts and host folders are neither hashed nor source;
+  inside git every tracked file is both. Run sw inside the folder the run was opened in. The verdict
   starts with PASS or FAIL, is logged after the check it certifies and on the same files, and a PASS
   names every changed file, tests included. The packet shows the changed files with their content
   when short and asks, per file, what it documents that the check did not exercise. A documented
