@@ -659,7 +659,7 @@ class RewindTests(SwTestCase):
         self.certify("1")
         done = self.events()[-1]
         self.assertEqual(len(done["snapshot"]), 40)
-        self.assertEqual(self.refs(), [f"refs/sw/{self.run.name}/start", f"refs/sw/{self.run.name}/step-1"])
+        self.assertEqual([r for r in self.refs() if self.run.name in r], [f"refs/sw/{self.run.name}/start", f"refs/sw/{self.run.name}/step-1"])
         self.assertIn("untracked.md", self.tree_files(f"refs/sw/{self.run.name}/step-1"))
 
     def test_rewind_restores_the_step_and_keeps_what_it_removed(self):
@@ -2975,3 +2975,39 @@ class ReviewRoundSevenTests(SwTestCase):
         self.open()
         self.sw("run", "check", "latest", "1", cwd=self.repo)
         self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.repo))
+
+
+class ReviewRoundEightTests(SwTestCase):
+    def setUp(self):
+        super().setUp()
+        self.git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+        self.repo = pathlib.Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        (self.repo / "core.py").write_text("def ok():\n    return True\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "base"], cwd=self.repo, check=True)
+        self.plan = pathlib.Path(self.tmp.name) / "plan.txt"
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+
+    def test_the_packet_diff_starts_at_the_session_baseline(self):
+        self.sw("run", "baseline", cwd=self.repo)
+        (self.repo / "core.py").write_text("def ok():\n    return False\n")
+        self.sw("run", "new", "r8", "--plan", str(self.plan), cwd=self.repo)
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        out = self.sw("run", "review", "latest", "1", cwd=self.repo)
+        self.assertIn("core.py", out)
+        self.assertIn("-    return True", out)
+        self.assertIn("+    return False", out)
+
+    def test_a_removed_file_since_the_baseline_shows_in_the_diff(self):
+        (self.repo / "old.py").write_text("OLD = 1\n")
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "old"], cwd=self.repo, check=True)
+        self.sw("run", "baseline", cwd=self.repo)
+        (self.repo / "old.py").unlink()
+        self.sw("run", "new", "r8", "--plan", str(self.plan), cwd=self.repo)
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        out = self.sw("run", "review", "latest", "1", cwd=self.repo)
+        self.assertIn("old.py (removed)", out)
+        self.assertIn("-OLD = 1", out)

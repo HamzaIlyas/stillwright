@@ -1163,14 +1163,14 @@ const START_MANIFEST: &str = "files-start.json";
 const MANIFEST_MAX: usize = 20_000;
 
 /// The start manifest for `cwd`: (status, files). Never fails: a huge folder gives none.
-fn start_manifest(store: &Store, cwd: &Path) -> (String, Option<BTreeMap<String, String>>) {
-    if let Ok(Some((ts, files))) = fresh_baseline(store, cwd) {
-        return (format!("baseline {ts}"), Some(files));
+fn start_manifest(store: &Store, cwd: &Path) -> (String, Option<BTreeMap<String, String>>, Option<String>) {
+    if let Ok(Some((ts, files, commit))) = fresh_baseline(store, cwd) {
+        return (format!("baseline {ts}"), Some(files), commit);
     }
     match dir_manifest(cwd) {
-        Ok(m) if m.len() > MANIFEST_MAX => ("unavailable: too many files".into(), None),
-        Ok(m) => ("ok".into(), Some(m)),
-        Err(why) => (format!("unavailable: {why}"), None),
+        Ok(m) if m.len() > MANIFEST_MAX => ("unavailable: too many files".into(), None, None),
+        Ok(m) => ("ok".into(), Some(m), None),
+        Err(why) => (format!("unavailable: {why}"), None, None),
     }
 }
 
@@ -1190,6 +1190,27 @@ fn write_baseline_forced(store: &Store, cwd: &Path) -> Result<usize> {
     write_baseline(store, cwd)
 }
 
+/// A snapshot commit of `top` under `refs/sw/baseline/<key>`: the diff base of a run opened on
+/// this baseline, so the packet shows what changed since the session began, removals included.
+fn baseline_commit(top: &str, key: &str) -> Option<String> {
+    let tree = tree_of_worktree(top, true).ok()?;
+    let mut args = vec!["commit-tree", tree.as_str(), "-m", "sw session baseline"];
+    if git(Some(top), &[], &["rev-parse", "--verify", "-q", "HEAD"]).is_some() {
+        args.extend(["-p", "HEAD"]);
+    }
+    let who = Path::new("stillwright");
+    let mail = Path::new("sw@stillwright.local");
+    let identity = [
+        ("GIT_AUTHOR_NAME", who),
+        ("GIT_AUTHOR_EMAIL", mail),
+        ("GIT_COMMITTER_NAME", who),
+        ("GIT_COMMITTER_EMAIL", mail),
+    ];
+    let commit = git(Some(top), &identity, &args)?;
+    git(Some(top), &[], &["update-ref", &format!("refs/sw/baseline/{key}"), &commit])?;
+    Some(commit)
+}
+
 fn write_baseline(store: &Store, cwd: &Path) -> Result<usize> {
     let files = walk_files(cwd)?;
     if files.len() > MANIFEST_MAX {
@@ -1202,18 +1223,21 @@ fn write_baseline(store: &Store, cwd: &Path) -> Result<usize> {
     let count = manifest.len();
     let path = baseline_path(store, cwd);
     fs::create_dir_all(path.parent().unwrap_or(&store.root)).map_err(|e| e.to_string())?;
+    let key = file_name(&path).trim_end_matches(".json").to_string();
+    let commit = git_top_of(cwd).and_then(|top| baseline_commit(&top, &key));
     let body = serde_json::json!({
         "cwd": fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()).to_string_lossy(),
         "ts": now(),
         "files": manifest,
+        "commit": commit,
     });
     fs::write(&path, serde_json::to_string(&body).map_err(|e| e.to_string())?)
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(count)
 }
 
-/// The baseline for `cwd` if one was recorded within BASELINE_HOURS: (when, files).
-fn fresh_baseline(store: &Store, cwd: &Path) -> Result<Option<(String, BTreeMap<String, String>)>> {
+/// The baseline for `cwd` if one was recorded within BASELINE_HOURS: (when, files, snapshot commit).
+fn fresh_baseline(store: &Store, cwd: &Path) -> Result<Option<(String, BTreeMap<String, String>, Option<String>)>> {
     let path = baseline_path(store, cwd);
     let Ok(text) = fs::read_to_string(&path) else {
         return Ok(None);
@@ -1233,7 +1257,8 @@ fn fresh_baseline(store: &Store, cwd: &Path) -> Result<Option<(String, BTreeMap<
         .get("files")
         .and_then(|f| serde_json::from_value(f.clone()).ok())
         .unwrap_or_default();
-    Ok(Some((ts, files)))
+    let commit = body.get("commit").and_then(|c| c.as_str()).map(str::to_string);
+    Ok(Some((ts, files, commit)))
 }
 
 /// The SessionStart hook's event on stdin, when there is one: not a terminal, and JSON.
@@ -2716,6 +2741,7 @@ fn run_brief(store: &Store, hook: bool) -> Result<()> {
         if let Some(dir) = dir {
             let dir = git_top_of(&dir).map(PathBuf::from).unwrap_or(dir);
             let fresh = fresh_baseline(store, &dir).ok().flatten().is_some();
+            let _ = &fresh;
             // A fresh baseline is kept whatever the event says: the event is text anyone can send.
             // `sw run done` and `sw run finish` renew it; otherwise it lapses after BASELINE_HOURS.
             let _ = source;
@@ -3770,8 +3796,8 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                 .and_then(|d| fs::canonicalize(d).ok())
                 .map(|d| d.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let (manifest_status, manifest) = if cwd.is_empty() {
-                ("unavailable: no current directory".to_string(), None)
+            let (manifest_status, manifest, baseline_commit) = if cwd.is_empty() {
+                ("unavailable: no current directory".to_string(), None, None)
             } else {
                 let root = git_top_of(Path::new(&cwd)).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(&cwd));
                 start_manifest(store, &root)
@@ -3843,11 +3869,23 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             if !freeze.is_empty() {
                 freeze_paths(&dir, &freeze)?;
             }
-            // Inside git, a snapshot of the tree as the run starts: the first review's diff starts
-            // here, even when the worker commits along the way. Quiet when git cannot (no harm).
+            // Inside git, the first review's diff starts where the review list starts: at the
+            // session baseline's snapshot when the run uses one, else at a snapshot of the tree as
+            // the run opens; either way the worker's own commits cannot empty it.
             if let Some(top) = git_top_of(Path::new(&cwd)) {
-                if let Ok(commit) = take_snapshot(&top, &dir, "start", "sw snapshot at run start") {
-                    append_event(&dir, &[("event".into(), "start-snapshot".into()), ("commit".into(), commit)])?;
+                let from_baseline = baseline_commit.filter(|c| {
+                    git(Some(&top), &[], &["rev-parse", "--verify", "-q", &format!("{c}^{{commit}}")]).is_some()
+                });
+                let commit = match from_baseline {
+                    Some(c) => Ok(c),
+                    None => {
+                        let label = free_label(&top, &dir, "start");
+                        take_snapshot(&top, &dir, &label, "sw snapshot at run start")
+                    }
+                };
+                match commit {
+                    Ok(commit) => append_event(&dir, &[("event".into(), "start-snapshot".into()), ("commit".into(), commit)])?,
+                    Err(why) => eprintln!("warning: no start snapshot for this run ({why}); the review's diff will start at HEAD"),
                 }
             }
             println!("{}", dir.display());
@@ -3858,7 +3896,7 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                 None => std::env::current_dir().map_err(|e| e.to_string())?,
             };
             let cwd = git_top_of(&cwd).map(PathBuf::from).unwrap_or(cwd);
-            if let Some((ts, _)) = fresh_baseline(store, &cwd)? {
+            if let Some((ts, _, _)) = fresh_baseline(store, &cwd)? {
                 return Err(format!(
                     "a baseline for {} was already recorded at {ts}; it is renewed by `sw run done` and `sw run finish`, not by hand",
                     cwd.display()
