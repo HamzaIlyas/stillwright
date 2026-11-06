@@ -50,7 +50,7 @@ lists every command. No `sw` on PATH: ask once, then `scripts/get-sw.sh`; unatte
 3. **Work the step.** `sw run next` names what can start. Route by `who:` (`sw route <who>`;
    small by default, mid for judgement no command checks, top only after mid failed), through
    `sw-worker` with a self-contained brief. Dangerous commands go through the gate (`sw gate`).
-   Tools: installed first, then `sw-scout`, `sw-forge` last.
+   Tools: installed first, `sw-scout`, then `sw-forge`.
 4. **Prove it: one call.** `sw run prove latest N` runs the check, writes the receipt and
    certifies the step. It refuses, with the reason, when the check fails, when frozen files
    changed, when the tree changed since the check, and when a **code step needs its review**:
@@ -64,10 +64,10 @@ lists every command. No `sw` on PATH: ask once, then `scripts/get-sw.sh`; unatte
    that the test did not exercise. Steps nothing executable can decide (prose, design) use the
    same packet and verdict, and the verdict is the pass.
    In Claude Code the Stop hook refuses to end the turn, once, while a `$` step is unproven:
-   prove it, or log `result=fail` with why, or add the card you are waiting on.
+   prove it, log `result=fail` with why, or add the card you wait on.
 5. **Finish: one call.** `sw run finish latest "<what was done and the proof, 5 lines max>"`
    closes the goal and adds the notify card. Your final message is that text and nothing more.
-   A real preference learned: `sw note add --source`. What the run taught: `sw lesson add`.
+   Preference learned: `sw note add --source`. Lesson learned: `sw lesson add`.
 
 ## Cost
 
