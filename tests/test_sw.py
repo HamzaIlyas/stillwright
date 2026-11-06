@@ -2457,3 +2457,163 @@ class ReviewRoundTwoTests(SwTestCase):
         self.open()
         with self.assertRaises(Failed):
             self.sw("run", "log", "latest", "step=1", "review=pass", cwd=self.work)
+
+
+class ReviewRoundThreeTests(SwTestCase):
+    """Holes the third adversarial review reproduced."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        (self.work / "tests").mkdir(parents=True)
+        (self.work / "app.py").write_text("def f():\n    return 1\n")
+        (self.work / "tests" / "test_app.py").write_text("import unittest\nfrom app import f\nclass T(unittest.TestCase):\n    def test_f(self):\n        self.assertEqual(f(), 2)\n")
+        self.plan = self.work / "plan.txt"
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ python3 -m unittest discover -s tests\nOutward: none\n")
+        self.git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+
+    def open(self, plan=None, cwd=None):
+        return pathlib.Path(self.sw("run", "new", "r3", "--plan", str(plan or self.plan), cwd=cwd or self.work).strip())
+
+    def verdict(self, run, text):
+        v = run / "checks" / "step-1-review.md"
+        v.parent.mkdir(exist_ok=True)
+        v.write_text(text)
+        return v
+
+    def test_check_and_done_from_outside_the_run_folder_still_bind_the_run_folder(self):
+        run = self.open()
+        (self.work / "app.py").write_text("def f():\n    return 2\n")
+        outside = pathlib.Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        (run / "plan.md").write_text(f"# Goal: g\nMust not: x\n1. a | check: $ python3 -c 'import sys; sys.path.insert(0, \"{self.work}\"); import app; assert app.f() == 2'\nOutward: none\n")
+        self.sw("run", "check", "latest", "1", cwd=outside)
+        v = self.verdict(run, "PASS: app.py returns 2; tests/test_app.py unchanged\n")
+        self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={v}", cwd=outside)
+        (self.work / "app.py").write_text("raise SystemExit(3)\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=outside)
+        self.assertIn("stale", str(cm.exception))
+
+    def test_a_verdict_given_on_another_tree_than_the_receipt_is_refused(self):
+        run = self.open()
+        (self.work / "app.py").write_text("def f():\n    return 2  # hack\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.work / "app.py").write_text("def f():\n    return 2  # honest\n")
+        v = self.verdict(run, "PASS: app.py honest; tests/test_app.py fine\n")
+        self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={v}", cwd=self.work)
+        (self.work / "app.py").write_text("def f():\n    return 2  # hack\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+    def test_baseline_command_does_not_overwrite_a_fresh_baseline(self):
+        self.sw("run", "baseline", cwd=self.work)
+        (self.work / "app.py").write_text("def f():\n    return 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "baseline", cwd=self.work)
+        self.assertIn("already", str(cm.exception))
+        self.open()
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+    def test_a_prose_check_with_a_code_change_needs_the_shaped_verdict_too(self):
+        self.plan.write_text("# Goal: g\nMust not: x\n1. fix f | check: the tests pass\nOutward: none\n")
+        run = self.open()
+        (self.work / "app.py").write_text("def f():\n    return 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "log", "latest", "step=1", "result=pass", self.evidence(), cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+        v = self.verdict(run, "PASS: app.py returns 2 as documented\n")
+        self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={v}", cwd=self.work)
+        self.assertIn("1/1", self.sw("run", "status", cwd=self.work))
+
+    def test_a_build_folder_inside_src_is_source_and_a_tests_log_fixture_is_bound(self):
+        (self.work / "src" / "build").mkdir(parents=True)
+        (self.work / "src" / "build" / "gen.py").write_text("G = 1\n")
+        (self.work / "tests" / "fixtures").mkdir()
+        (self.work / "tests" / "fixtures" / "sample.log").write_text("a\n")
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        self.open()
+        (self.work / "src" / "build" / "gen.py").write_text("G = 2\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("gen.py", str(cm.exception))
+        (self.work / "tests" / "fixtures" / "sample.log").write_text("b\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.work / "tests" / "fixtures" / "sample.log").write_text("c\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("stale", str(cm.exception))
+
+    def test_data_env_and_template_files_need_review_but_docs_do_not(self):
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        self.open()
+        for name in ("rate.txt", ".env", "page.j2", "Procfile", "run"):
+            (self.work / name).write_text("v=1\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        for name in ("rate.txt", ".env", "page.j2", "Procfile"):
+            self.assertIn(name, str(cm.exception))
+        docs = self.open()
+        (self.work / "README.md").write_text("notes\n")
+        (self.work / "docs").mkdir()
+        (self.work / "docs" / "guide.txt").write_text("notes\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_inside_git_a_run_in_a_subfolder_reviews_the_whole_repository(self):
+        repo = pathlib.Path(self.tmp.name) / "repo"
+        (repo / "sub").mkdir(parents=True)
+        (repo / "lib").mkdir()
+        (repo / "lib" / "core.py").write_text("C = 1\n")
+        (repo / "sub" / "x.py").write_text("X = 1\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=repo, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "base"], cwd=repo, check=True)
+        plan = repo / "plan.txt"
+        plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        self.open(plan=plan, cwd=repo / "sub")
+        (repo / "lib" / "core.py").write_text("C = 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=repo / "sub")
+        self.assertIn("core.py", str(cm.exception))
+
+    def test_packet_lists_tests_too_and_a_name_at_a_sentence_end_counts(self):
+        run = self.open()
+        (self.work / "app.py").write_text("def f():\n    return 2\n")
+        (self.work / "tests" / "test_more.py").write_text("import unittest\nclass U(unittest.TestCase):\n    def test_u(self):\n        pass\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        packet = self.sw("run", "review", "latest", "1", cwd=self.work)
+        self.assertIn("test_more.py", packet)
+        v = self.verdict(run, "PASS\nI checked app.py. I also read test_more.py.\n")
+        self.assertIn("review verdict recorded", self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={v}", cwd=self.work))
+
+    def test_inside_git_host_noise_does_not_stale_the_receipt(self):
+        subprocess.run([*self.git, "init", "-q"], cwd=self.work, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=self.work, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "base"], cwd=self.work, check=True)
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        self.open()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.work / ".claude").mkdir()
+        (self.work / ".claude" / "settings.local.json").write_text("{}\n")
+        (self.work / "session.log").write_text("x\n")
+        (self.work / "stream.jsonl").write_text("{}\n")
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_state_folder_inside_a_git_repo_is_not_under_review(self):
+        subprocess.run([*self.git, "init", "-q"], cwd=self.work, check=True)
+        env = {**self.env, "STILLWRIGHT_HOME": str(self.work / "swstate")}
+        def sw(*argv):
+            r = subprocess.run([SW, *argv], env=env, capture_output=True, text=True, cwd=self.work)
+            if r.returncode != 0:
+                raise Failed(r.stderr.strip())
+            return r.stdout
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\n2. b | check: $ true | after: 1\nOutward: none\n")
+        sw("run", "new", "inside", "--plan", str(self.plan))
+        self.assertIn("certified", sw("run", "prove", "latest", "1"))
+        self.assertIn("certified", sw("run", "prove", "latest", "2"))

@@ -875,16 +875,27 @@ fn tree_of_worktree(top: &str, keep_objects: bool) -> Result<String> {
 /// Stage the working tree into the store's index and write it as a tree object.
 fn stage_tree(top: &str, store: &TempStore) -> Result<String> {
     let envs = store.envs();
-    let mut add = vec!["add", "-A", "--", "."];
-    let exclude;
+    let mut owned: Vec<String> = vec!["add".into(), "-A".into(), "--".into(), ".".into()];
     if let Ok(state) = state_root().and_then(|s| fs::canonicalize(s).map_err(|e| e.to_string())) {
         if let Ok(top_real) = fs::canonicalize(top) {
             if let Ok(rel) = state.strip_prefix(&top_real) {
-                exclude = format!(":(exclude){}", rel.to_string_lossy().replace('\\', "/"));
-                add.push(&exclude);
+                owned.push(format!(":(exclude){}", rel.to_string_lossy().replace('\\', "/")));
             }
         }
     }
+    // Host folders and noise files are not the work: they must not make a receipt stale.
+    for d in HOST_DIRS_ANYWHERE {
+        owned.push(format!(":(exclude){d}"));
+        owned.push(format!(":(exclude)*/{d}"));
+    }
+    for e in NOISE_EXT {
+        owned.push(format!(":(exclude)*{e}"));
+    }
+    for n in NOISE_NAMES {
+        owned.push(format!(":(exclude){n}"));
+        owned.push(format!(":(exclude)*/{n}"));
+    }
+    let add: Vec<&str> = owned.iter().map(String::as_str).collect();
     git(Some(top), &envs, &add)
         .ok_or_else(|| {
             format!(
@@ -896,62 +907,72 @@ fn stage_tree(top: &str, store: &TempStore) -> Result<String> {
         })
 }
 
-/// Hash of the working tree: git's tree hash inside a repository, an error when git fails
-/// there, and outside one a content hash of `root` (`dir:<sha256>`, the folder the run was
-/// opened in), so a receipt binds the files even where there is no repository.
-fn worktree_hash_at(root: &Path) -> Result<String> {
-    match git_top() {
-        Some(top) => tree_of_worktree(&top, false),
-        None => Ok(format!("dir:{}", dir_hash(root)?)),
-    }
+/// The folder a run answers for: the repository top when the run was opened inside one (the
+/// receipt is the whole repository, so the review is too), else the folder it was opened in.
+fn review_root(run: &Path) -> Result<PathBuf> {
+    let opened = match run_cwd(run) {
+        Some(c) => PathBuf::from(c),
+        None => std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?,
+    };
+    Ok(git_top_of(&opened).map(PathBuf::from).unwrap_or(opened))
 }
 
-/// The folder a run binds: where it was opened, or the current directory for an older run.
-fn run_root(run: &Path) -> Result<PathBuf> {
-    match run_cwd(run) {
-        Some(c) => Ok(PathBuf::from(c)),
-        None => std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}")),
-    }
+/// `git rev-parse --show-toplevel` for a folder, if it is inside a repository.
+fn git_top_of(dir: &Path) -> Option<String> {
+    git(Some(&dir.to_string_lossy()), &[], &["rev-parse", "--show-toplevel"])
 }
 
-/// The folder a receipt binds outside git: the run's folder when sw runs inside it (so a
-/// subfolder cannot narrow the hash), otherwise the folder the check runs in, which is where
-/// the work being certified lives.
-fn require_inside_run_root(run: &Path) -> Result<PathBuf> {
-    let root = run_root(run)?;
+/// Hash of the working tree for a run: git's tree hash inside a repository, an error when git
+/// fails there; outside one a content hash (`dir:<sha256>`) of the folder the run was opened in,
+/// joined with the current folder's when sw runs somewhere else, so a receipt binds the work
+/// wherever the check was run from.
+fn worktree_hash_for(run: &Path) -> Result<String> {
+    if let Some(top) = git_top() {
+        return tree_of_worktree(&top, false);
+    }
+    let root = review_root(run)?;
     let here = std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
     let here_c = fs::canonicalize(&here).unwrap_or_else(|_| here.clone());
     let root_c = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+    let root_hash = dir_hash(&root)?;
     if here_c.starts_with(&root_c) {
-        Ok(root)
-    } else {
-        Ok(here)
+        return Ok(format!("dir:{root_hash}"));
     }
+    let here_hash = dir_hash(&here)?;
+    Ok(format!("dir:{:x}", Sha256::digest(format!("{root_hash}+{here_hash}").as_bytes())))
 }
 
-/// Folders hosts and tools write during any run: never hashed, never source.
-const HOST_DIRS: &[&str] = &[
+/// Folders hosts and tools write anywhere in a tree: never hashed, never source.
+const HOST_DIRS_ANYWHERE: &[&str] = &[
     ".git", ".claude", ".codex", ".gemini", ".cursor", ".idea", ".vscode", ".cache",
     ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv", "node_modules",
-    "target", "__pycache__", ".DS_Store", "dist", "build", "htmlcov", "coverage",
+    "__pycache__", ".DS_Store",
 ];
+/// Build output at the top of a tree. Deeper down (`src/build/`) a folder of that name is code.
+const HOST_DIRS_TOP: &[&str] = &["target", "dist", "build", "htmlcov", "coverage"];
 /// Files that change without the work changing: logs, transcripts, temp and backup files.
 const NOISE_EXT: &[&str] = &[
     ".log", ".jsonl", ".tmp", ".bak", ".swp", ".orig", ".pyc", ".pyo", ".class", ".o",
 ];
-/// Over this size a file is bound by its length, not its content.
+const NOISE_NAMES: &[&str] = &[".coverage", "stderr.txt", "stdout.txt"];
+/// Over this size a file is bound by its length and modification time, not its content.
 const BIG_FILE: u64 = 8 * 1024 * 1024;
 
 fn is_noise_path(rel: &str) -> bool {
     let lower = rel.to_lowercase();
-    if lower.split('/').any(|seg| HOST_DIRS.contains(&seg)) {
+    let segs: Vec<&str> = lower.split('/').collect();
+    if segs.iter().any(|seg| HOST_DIRS_ANYWHERE.contains(seg)) {
         return true;
     }
-    let name = lower.rsplit('/').next().unwrap_or(&lower);
-    name == ".coverage"
-        || name == "stderr.txt"
-        || name == "stdout.txt"
-        || NOISE_EXT.iter().any(|e| lower.ends_with(e))
+    if segs.len() > 1 && HOST_DIRS_TOP.contains(&segs[0]) {
+        return true;
+    }
+    if is_test_path(rel) {
+        // Test fixtures of any kind are bound and reviewed with the tests.
+        return false;
+    }
+    let name = segs.last().copied().unwrap_or("");
+    NOISE_NAMES.contains(&name) || NOISE_EXT.iter().any(|e| lower.ends_with(e))
 }
 
 /// Every bound file under `root` as (relative path, path), sorted. Inside a git repository the
@@ -960,9 +981,16 @@ fn is_noise_path(rel: &str) -> bool {
 fn walk_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
     let mut files: Vec<(String, PathBuf)> = Vec::new();
     let root_s = root.to_string_lossy().into_owned();
+    let state = state_root().ok().and_then(|s| fs::canonicalize(s).ok());
     if git(Some(&root_s), &[], &["rev-parse", "--show-toplevel"]).is_some() {
         if let Some(listing) = git(Some(&root_s), &[], &["ls-files", "-co", "--exclude-standard", "-z"]) {
+            let state_rel = state.as_ref().and_then(|st| {
+                fs::canonicalize(root).ok().and_then(|r| st.strip_prefix(r).ok().map(|p| p.to_string_lossy().replace('\\', "/")))
+            });
             for rel in listing.split('\0').filter(|r| !r.is_empty()) {
+                if state_rel.as_deref().is_some_and(|sr| rel == sr || rel.starts_with(&format!("{sr}/"))) {
+                    continue;
+                }
                 let path = root.join(rel);
                 if path.is_file() && !is_noise_path(rel) {
                     files.push((rel.to_string(), path));
@@ -973,7 +1001,6 @@ fn walk_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
             return Ok(files);
         }
     }
-    let state = state_root().ok().and_then(|s| fs::canonicalize(s).ok());
     fn walk(root: &Path, dir: &Path, state: Option<&Path>, out: &mut Vec<(String, PathBuf)>) {
         let Ok(entries) = fs::read_dir(dir) else {
             return;
@@ -981,7 +1008,7 @@ fn walk_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
         for entry in entries.flatten() {
             let path = entry.path();
             let name = file_name(&path);
-            if HOST_DIRS.contains(&name.as_str()) {
+            if HOST_DIRS_ANYWHERE.contains(&name.as_str()) || (dir == root && HOST_DIRS_TOP.contains(&name.as_str())) {
                 continue;
             }
             let Ok(meta) = fs::symlink_metadata(&path) else {
@@ -1014,7 +1041,13 @@ fn walk_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
 fn file_digest(path: &Path) -> String {
     match fs::metadata(path) {
         Ok(m) if m.len() > BIG_FILE => {
-            format!("{:x}", Sha256::digest(format!("size:{}", m.len()).as_bytes()))
+            let mtime = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            format!("{:x}", Sha256::digest(format!("size:{} mtime:{mtime}", m.len()).as_bytes()))
         }
         _ => match fs::read(path) {
             Ok(bytes) => format!("{:x}", Sha256::digest(&bytes)),
@@ -1060,12 +1093,9 @@ fn start_manifest(store: &Store, cwd: &Path) -> (String, Option<BTreeMap<String,
     if let Ok(Some((ts, files))) = fresh_baseline(store, cwd) {
         return (format!("baseline {ts}"), Some(files));
     }
-    match walk_files(cwd) {
-        Ok(files) if files.len() > MANIFEST_MAX => ("unavailable: too many files".into(), None),
-        Ok(_) => match dir_manifest(cwd) {
-            Ok(m) => ("ok".into(), Some(m)),
-            Err(why) => (format!("unavailable: {why}"), None),
-        },
+    match dir_manifest(cwd) {
+        Ok(m) if m.len() > MANIFEST_MAX => ("unavailable: too many files".into(), None),
+        Ok(m) => ("ok".into(), Some(m)),
         Err(why) => (format!("unavailable: {why}"), None),
     }
 }
@@ -1080,6 +1110,10 @@ fn baseline_path(store: &Store, cwd: &Path) -> PathBuf {
         .unwrap_or_else(|_| cwd.to_string_lossy().into_owned());
     let digest = format!("{:x}", Sha256::digest(key.as_bytes()));
     store.root.join("baselines").join(format!("{}.json", &digest[..16]))
+}
+
+fn write_baseline_forced(store: &Store, cwd: &Path) -> Result<usize> {
+    write_baseline(store, cwd)
 }
 
 fn write_baseline(store: &Store, cwd: &Path) -> Result<usize> {
@@ -1166,7 +1200,7 @@ fn review_files(run: &Path) -> Result<Option<Vec<String>>> {
         ));
     };
     let base: BTreeMap<String, String> = serde_json::from_str(&text).unwrap_or_default();
-    let now = dir_manifest(&run_root(run)?)?;
+    let now = dir_manifest(&review_root(run)?)?;
     let mut changed = Vec::new();
     for (path, hash) in &now {
         if base.get(path) != Some(hash) && needs_review_path(path) {
@@ -1181,25 +1215,14 @@ fn review_files(run: &Path) -> Result<Option<Vec<String>>> {
     Ok(Some(changed))
 }
 
-/// Source files (tests left out) changed since the last certified step or the start, for the packet.
-fn changed_source_files(run: &Path) -> Result<Vec<String>> {
-    Ok(review_files(run)?
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|p| !is_test_path(p.trim_end_matches(" (removed)")))
-        .collect())
-}
-
-/// Code by extension or name, plus tests: what a reviewer must hold against the contract.
+/// What a reviewer must hold against the contract: every bound file except documents and media.
+/// Data files, env files, templates and scripts change behaviour; a README does not.
 fn needs_review_path(rel: &str) -> bool {
-    const CODE_EXT: &[&str] = &[
-        ".py", ".pyi", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rs", ".go", ".java", ".kt",
-        ".kts", ".rb", ".php", ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".cs", ".swift",
-        ".m", ".mm", ".sh", ".bash", ".zsh", ".ps1", ".sql", ".scala", ".dart", ".lua", ".pl",
-        ".pm", ".ex", ".exs", ".erl", ".hs", ".ml", ".clj", ".r", ".jl", ".vue", ".svelte",
-        ".yml", ".yaml", ".toml", ".json", ".ini", ".cfg", ".html", ".css", ".scss",
+    const DOC_EXT: &[&str] = &[".md", ".rst", ".adoc", ".markdown"];
+    const MEDIA_EXT: &[&str] = &[
+        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".pdf", ".woff", ".woff2", ".ttf",
+        ".otf", ".mp4", ".mp3", ".wav", ".zip", ".gz", ".tar", ".whl", ".jar",
     ];
-    const CODE_NAMES: &[&str] = &["makefile", "dockerfile", "justfile", "rakefile", "gemfile", "procfile"];
     if is_noise_path(rel) {
         return false;
     }
@@ -1207,8 +1230,17 @@ fn needs_review_path(rel: &str) -> bool {
         return true;
     }
     let lower = rel.to_lowercase();
-    let name = lower.rsplit('/').next().unwrap_or(&lower);
-    CODE_NAMES.contains(&name) || CODE_EXT.iter().any(|e| lower.ends_with(e))
+    let segs: Vec<&str> = lower.split('/').collect();
+    let name = segs.last().copied().unwrap_or("");
+    if DOC_EXT.iter().chain(MEDIA_EXT).any(|e| lower.ends_with(e)) {
+        return false;
+    }
+    if lower.ends_with(".txt") {
+        let in_docs = segs.iter().any(|seg| matches!(*seg, "docs" | "doc"));
+        let doc_name = name.starts_with("readme") || name.starts_with("changelog") || name.starts_with("license") || name.starts_with("notice");
+        return !(in_docs || doc_name);
+    }
+    true
 }
 
 /// Test files by the usual conventions: a tests/test/__tests__/spec folder, test_*.py, *_test.py,
@@ -1229,13 +1261,19 @@ fn is_test_path(rel: &str) -> bool {
 
 /// The latest reviewer verdict logged for a step and where it sits in the log, so `done` can
 /// tell whether it came after the receipt it certifies.
-fn review_verdict(run: &Path, step: &str) -> Result<Option<(String, usize)>> {
+fn review_verdict(run: &Path, step: &str) -> Result<Option<(String, usize, String)>> {
     Ok(log_events(run)?
         .iter()
         .enumerate()
         .rev()
         .find(|(_, e)| event_is(e, "step", step) && e.contains_key("review"))
-        .map(|(i, e)| (e.get("review").map(value_str).unwrap_or_default(), i)))
+        .map(|(i, e)| {
+            (
+                e.get("review").map(value_str).unwrap_or_default(),
+                i,
+                e.get("tree").map(value_str).unwrap_or_default(),
+            )
+        }))
 }
 
 fn latest_receipt_index(run: &Path, step: &str) -> Result<Option<usize>> {
@@ -1256,8 +1294,12 @@ fn names_file(text: &str, base: &str) -> bool {
     let is_name_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.' | '-');
     text.match_indices(base).any(|(i, _)| {
         let before = text[..i].chars().next_back();
-        let after = text[i + base.len()..].chars().next();
-        !before.is_some_and(is_name_char) && !after.is_some_and(is_name_char)
+        let rest = &text[i + base.len()..];
+        let mut after = rest.chars();
+        let next = after.next();
+        let next2 = after.next();
+        let ends_sentence = matches!(next, Some('.' | ',' | ':' | ';')) && !next2.is_some_and(is_name_char);
+        !before.is_some_and(is_name_char) && (!next.is_some_and(is_name_char) || ends_sentence)
     })
 }
 
@@ -1665,7 +1707,6 @@ fn load_guards(workspace: &Path) -> Vec<(gate::Verdict, String)> {
 fn run_check(store: &Store, run: &Path, step: &str) -> Result<()> {
     let cmd = step_command(run, step)?;
     require_consent(store, run, step)?;
-    let root = require_inside_run_root(run)?;
     // The check runs a command: it goes through the gate like any other, and an outward
     // command inside a check needs the same consent as an outward step.
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -1718,7 +1759,7 @@ fn run_check(store: &Store, run: &Path, step: &str) -> Result<()> {
         log_path = checks.join(format!("{step}-{stamp}-{n}.log"));
     }
     fs::write(&log_path, &text).map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
-    let tree = worktree_hash_at(&root)?;
+    let tree = worktree_hash_for(run)?;
     event.insert("exit".into(), code.into());
     event.insert("ok".into(), (code == 0).into());
     event.insert("secs".into(), ((secs * 10.0).round() / 10.0).into());
@@ -1796,8 +1837,8 @@ fn run_done(store: &Store, run: &Path, step: &str) -> Result<()> {
         ));
     }
     let then = receipt.get("tree").map(value_str).unwrap_or_default();
-    let root = require_inside_run_root(run)?;
-    let tree = worktree_hash_at(&root)?;
+    let root = review_root(run)?;
+    let tree = worktree_hash_for(run)?;
     if then != tree {
         return Err(format!(
             "step {step}: stale receipt: the working tree changed since the check (was {}, now {}); run `sw run check` again",
@@ -1815,15 +1856,15 @@ fn run_done(store: &Store, run: &Path, step: &str) -> Result<()> {
     if let Some(why) = needs {
         let receipt_at = latest_receipt_index(run, step)?.unwrap_or(0);
         match review_verdict(run, step)? {
-            Some((v, at)) if v == "pass" && at > receipt_at => {}
-            Some((v, _)) if v == "fail" => {
+            Some((v, at, t)) if v == "pass" && at > receipt_at && t == tree => {}
+            Some((v, _, _)) if v == "fail" => {
                 return Err(format!(
                     "step {step}: the reviewer failed it; fix the work, run `sw run check {name} {step}`, review again, then `sw run done`"
                 ))
             }
             Some(_) => {
                 return Err(format!(
-                    "step {step}: the review verdict was given before the latest check, on an earlier state of the files; run `sw run review {name} {step}` again, log the new verdict, then `sw run done`"
+                    "step {step}: the review verdict does not match this check (given before it, or on other files); run `sw run review {name} {step}` again, log the new verdict from the work folder, then `sw run done`"
                 ))
             }
             None => {
@@ -1863,7 +1904,7 @@ fn run_done(store: &Store, run: &Path, step: &str) -> Result<()> {
             let _ = fs::write(run.join(CERTIFIED_MANIFEST), text);
         }
     }
-    let _ = write_baseline(store, &root);
+    let _ = write_baseline_forced(store, &root);
     println!(
         "step {step}: done, certified (`{cmd}` exit 0 on tree {})",
         short(&tree)
@@ -2233,17 +2274,16 @@ fn run_review(run: &Path, step: &str) -> Result<()> {
 /// The source files a step changed since the run started, with their current content when
 /// short, so a reviewer can hold the change against what the file documents.
 fn print_changed_sources(run: &Path, token: &str) -> Result<()> {
-    if !run.join(START_MANIFEST).exists() {
-        println!("\nSource files changed since the run started: unknown (no start manifest; the run was opened in a folder too large to list)");
+    let Some(changed) = review_files(run)? else {
+        println!("\nFiles changed since the run started: unknown (the folder was too large to list), so every file the step touched is under review");
         return Ok(());
-    }
-    let changed = changed_source_files(run)?;
+    };
     if changed.is_empty() {
-        println!("\nSource files changed since the run started (tests left out): none");
+        println!("\nFiles changed since the run started (or the last certified step), tests included: none");
         return Ok(());
     }
     println!(
-        "\nSource files changed since the run started (tests left out): {}",
+        "\nFiles changed since the run started (or the last certified step), tests included: {}",
         changed.join(", ")
     );
     println!(
@@ -2251,7 +2291,7 @@ fn print_changed_sources(run: &Path, token: &str) -> Result<()> {
          that the check did not exercise, and does the code deliver it? A documented behaviour left \
          broken or unimplemented is FAIL. Name every file in the verdict."
     );
-    let cwd = run_cwd(run).unwrap_or_default();
+    let cwd = review_root(run).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     for rel in &changed {
         if rel.ends_with(" (removed)") {
             continue;
@@ -2456,7 +2496,7 @@ fn stop_reason(store: &Store, dir: &Path) -> Result<Option<String>> {
         let title = plan_step_title(&plan, &step);
         return Ok(Some(format!(
             "stillwright: run {name} step {step} ({title}) {state}, so this turn cannot end as done. \
-             Run `sw run check {name} {step}` and then `sw run done {name} {step}`. \
+             Run `sw run check {name} {step}` and then `sw run done {name} {step}` (a step that changed code or tests also needs the fresh reviewer's verdict; `done` says how). \
              If the step is not done, say so: `sw run log {name} step={step} result=fail note=<why>`. \
              If you are waiting on the user, add a card (`sw inbox add ask \"<question>\" --run {name}`), then stop again."
         )));
@@ -2534,9 +2574,10 @@ fn run_brief(store: &Store, hook: bool) -> Result<()> {
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok());
         if let Some(dir) = dir {
+            let dir = git_top_of(&dir).map(PathBuf::from).unwrap_or(dir);
             let fresh = fresh_baseline(store, &dir).ok().flatten().is_some();
             if dir.is_dir() && (source == "startup" || !fresh) {
-                let _ = write_baseline(store, &dir);
+                let _ = write_baseline_forced(store, &dir);
             }
         }
     }
@@ -3589,7 +3630,8 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             let (manifest_status, manifest) = if cwd.is_empty() {
                 ("unavailable: no current directory".to_string(), None)
             } else {
-                start_manifest(store, Path::new(&cwd))
+                let root = git_top_of(Path::new(&cwd)).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(&cwd));
+                start_manifest(store, &root)
             };
             let goal_id = match goal.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
                 None => String::new(),
@@ -3665,6 +3707,13 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                 Some(d) => PathBuf::from(d),
                 None => std::env::current_dir().map_err(|e| e.to_string())?,
             };
+            let cwd = git_top_of(&cwd).map(PathBuf::from).unwrap_or(cwd);
+            if let Some((ts, _)) = fresh_baseline(store, &cwd)? {
+                return Err(format!(
+                    "a baseline for {} was already recorded at {ts}; it is renewed by `sw run done` and `sw run finish`, not by hand",
+                    cwd.display()
+                ));
+            }
             let count = write_baseline(store, &cwd)?;
             println!("baseline recorded for {} ({count} files); runs opened here within {BASELINE_HOURS} hours compare against it", cwd.display());
         }
@@ -3725,8 +3774,8 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             });
             store.save("inbox.json", &cards)?;
             append_event(&dir, &[("event".into(), "finish".into()), ("card".into(), id.to_string())])?;
-            if let Ok(root) = run_root(&dir) {
-                let _ = write_baseline(store, &root);
+            if let Ok(root) = review_root(&dir) {
+                let _ = write_baseline_forced(store, &root);
             }
             println!("inbox {id} (notify) added{closed}");
         }
@@ -3785,7 +3834,7 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                         let mut pairs = with_evidence(parsed, &dir, &run, &step)?;
                         pairs.retain(|(k, _)| k != "result" && k != "check");
                         pairs.push(("review".into(), result.clone()));
-                        pairs.push(("tree".into(), worktree_hash_at(&run_root(&dir)?)?));
+                        pairs.push(("tree".into(), worktree_hash_for(&dir)?));
                         note_plan(&dir)?;
                         append_event(&dir, &pairs)?;
                         if result == "pass" {
@@ -3804,6 +3853,22 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                 }
                 if result == "pass" {
                     require_consent(store, &dir, &step)?;
+                    // Code or tests changed under a prose check: the pass is the reviewer's verdict,
+                    // in the file the packet names, shaped like any other.
+                    let must_review = !matches!(review_files(&dir)?, Some(ref v) if v.is_empty());
+                    if must_review {
+                        let expected = fs::canonicalize(verdict_file(&dir, &step)).ok().map(plain_path);
+                        let given = value("evidence")
+                            .and_then(|v| fs::canonicalize(v.trim()).ok())
+                            .map(plain_path);
+                        if given.is_none() || given != expected {
+                            return Err(format!(
+                                "step {step}: code or test files changed, so the pass needs the fresh reviewer's verdict in {} (`sw run review {run} {step}` prints the packet); other evidence does not cover a code change",
+                                verdict_file(&dir, &step).display()
+                            ));
+                        }
+                        check_verdict_shape(&dir, &result, &verdict_file(&dir, &step))?;
+                    }
                     // The check the pass was logged against is the plan's, not the caller's.
                     parsed = with_evidence(parsed, &dir, &run, &step)?
                         .into_iter()
