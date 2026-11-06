@@ -19,7 +19,9 @@ from collections import defaultdict
 
 def _cost(r: dict) -> float:
     v = r.get("cost_usd", "")
-    return float(v) if v not in ("", "None") else 0.0
+    if v in ("", "None"):
+        raise SystemExit(f"row {r.get('task')}/{r.get('epoch')} has no cost_usd; every scored run must carry its receipt cost")
+    return float(v)
 
 
 def cost_per_pass(rows: list[dict]) -> float:
@@ -44,11 +46,18 @@ def ratio_ci(with_rows: list[dict], plain_rows: list[dict], seed: int = 20261105
         sample = rng.choices(tasks, k=len(tasks))
         wr = [r for t in sample for r in w.get(t, [])]
         pr = [r for t in sample for r in p.get(t, [])]
-        cw, cp = cost_per_pass(wr), cost_per_pass(pr)
-        ratios.append(cw / cp if cp not in (0.0, float("inf")) and cw != float("inf") else float("inf"))
+        ratios.append(_ratio(cost_per_pass(wr), cost_per_pass(pr)))
     ratios.sort()
-    point = cost_per_pass(with_rows) / cost_per_pass(plain_rows)
-    return ratios[int(0.025 * b)], ratios[int(0.975 * b) - 1], point
+    point = _ratio(cost_per_pass(with_rows), cost_per_pass(plain_rows))
+    lo_i, hi_i = round(0.025 * (b - 1)), round(0.975 * (b - 1))
+    return ratios[lo_i], ratios[hi_i], point
+
+
+def _ratio(cw: float, cp: float) -> float:
+    """with/plain; no passes on either side is infinity (undefined), reported as such rather than hidden."""
+    if cw == float("inf") or cp == float("inf") or cp == 0.0:
+        return float("inf")
+    return cw / cp
 
 
 def load(path: str) -> list[dict]:
