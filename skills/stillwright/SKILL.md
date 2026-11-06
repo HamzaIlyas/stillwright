@@ -56,8 +56,8 @@ No `sw` on PATH: ask once, then `scripts/get-sw.sh`; unattended, stop.
 4. **Prove it: one call.** `sw run prove latest N` runs the check, writes the receipt and
    certifies the step. It refuses, with the reason, on a failing check, a changed frozen file, a
    tree changed since the check, and a **code step that needs its review**:
-   a step after which code or test files changed is certified only once a fresh reviewer judged
-   the change against what the touched files document, whatever the check command was. Then: `sw run
+   a step after which any file but docs or media changed is certified only once a fresh reviewer
+   judged the change against what the touched files document, whatever the check command was. Then: `sw run
    review latest N` prints the packet (goal, must-nots, diff or changed files with their
    content, check output); give it, and nothing else, to a read-only reviewer on the small model
    (`sw-verify`); save its reply verbatim as `checks/step-N-review.md` (PASS or FAIL first, every

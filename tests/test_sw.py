@@ -1604,10 +1604,10 @@ class ReviewHardeningTests(SwTestCase):
         self.sw("run", "snapshot", "latest", "2", cwd=self.work)
         (self.work / "two.txt").write_text("step 2 work\n")
         out = self.sw("run", "review", "latest", "2", cwd=self.work)
-        self.assertIn("since the snapshot before step 2", out)
+        # one.txt changed before the snapshot and nobody reviewed it, so the snapshot did not move
+        # the review base and the packet shows both changes
         self.assertIn("+step 2 work", out)
-        # the diff is scoped to the snapshot; the file list still names one.txt, which nobody reviewed
-        self.assertNotIn("+step 1 work", out)
+        self.assertIn("+step 1 work", out)
         self.assertIn("one.txt", out)
 
     def test_evidence_inside_the_run_folder_or_blank_is_refused(self):
@@ -2804,3 +2804,90 @@ class ReviewRoundFiveTests(SwTestCase):
         with self.assertRaises(Failed) as cm:
             self.sw("run", "done", "latest", "1", cwd=work)
         self.assertIn("stale", str(cm.exception))
+
+
+class ReviewRoundSixTests(SwTestCase):
+    def setUp(self):
+        super().setUp()
+        self.git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+        self.repo = pathlib.Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        (self.repo / "core.py").write_text("def ok():\n    return True\n")
+        (self.repo / "other.py").write_text("O = 1\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "base"], cwd=self.repo, check=True)
+        self.plan = pathlib.Path(self.tmp.name) / "plan.txt"
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\n2. b | check: $ true | after: 1\nOutward: none\n")
+
+    def open(self, plan=None):
+        return pathlib.Path(self.sw("run", "new", "r6", "--plan", str(plan or self.plan), cwd=self.repo).strip())
+
+    def test_a_late_snapshot_does_not_hide_the_diff_from_the_packet(self):
+        self.open()
+        (self.repo / "core.py").write_text("def ok():\n    return False\n")
+        self.sw("run", "snapshot", "latest", "1", cwd=self.repo)
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        out = self.sw("run", "review", "latest", "1", cwd=self.repo)
+        self.assertIn("-    return True", out)
+        self.assertIn("+    return False", out)
+
+    def test_an_untracked_nested_repository_is_bound(self):
+        nested = self.repo / "vendor" / "lib"
+        nested.mkdir(parents=True)
+        (nested / "v.py").write_text("V = 1\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=nested, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=nested, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "v"], cwd=nested, check=True)
+        self.open()
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        (nested / "v.py").write_text("V = 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.repo)
+        self.assertIn("stale", str(cm.exception))
+
+    def test_tracked_files_inside_a_submodule_are_bound_whatever_their_folder(self):
+        sub = pathlib.Path(self.tmp.name) / "subsrc"
+        (sub / "build").mkdir(parents=True)
+        (sub / "build" / "conf.js").write_text("x = 1\n")
+        subprocess.run([*self.git, "init", "-q"], cwd=sub, check=True)
+        subprocess.run([*self.git, "add", "-A"], cwd=sub, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "s"], cwd=sub, check=True)
+        subprocess.run([*self.git, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "sub"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "add sub"], cwd=self.repo, check=True)
+        self.open()
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        (self.repo / "sub" / "build" / "conf.js").write_text("x = 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.repo)
+        self.assertIn("stale", str(cm.exception))
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_a_tracked_symlink_to_a_folder_is_not_walked(self):
+        outside = pathlib.Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        (outside / "locked.txt").write_text("x\n")
+        (self.repo / "link").symlink_to(outside)
+        subprocess.run([*self.git, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run([*self.git, "commit", "-q", "-m", "link"], cwd=self.repo, check=True)
+        (outside / "locked.txt").chmod(0)
+        try:
+            self.open()
+            self.assertIn("check passed", self.sw("run", "check", "latest", "1", cwd=self.repo))
+        finally:
+            (outside / "locked.txt").chmod(0o644)
+
+    def test_parallel_steps_each_answer_for_their_own_changes(self):
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ true\n2. b | check: $ true\nOutward: none\n")
+        run = self.open()
+        (self.repo / "core.py").write_text("def ok():\n    return False\n")
+        self.sw("run", "check", "latest", "1", cwd=self.repo)
+        self.sw("run", "check", "latest", "2", cwd=self.repo)
+        v2 = run / "checks" / "step-2-review.md"
+        v2.parent.mkdir(exist_ok=True)
+        v2.write_text("PASS: core.py reviewed as step 2's work\n")
+        self.sw("run", "log", "latest", "step=2", "result=pass", f"evidence={v2}", cwd=self.repo)
+        self.assertIn("certified", self.sw("run", "done", "latest", "2", cwd=self.repo))
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.repo)
+        self.assertIn("core.py", str(cm.exception))

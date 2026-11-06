@@ -31,8 +31,8 @@ A command that exits 0 is the cheapest and most honest verdict there is, and for
 is the whole verdict. Two cases need a model reviewer, always a fresh read-only subagent on the
 small model that sees the packet and nothing else, so it costs cents:
 
-- **A code step.** When code or test files changed since the run started (or since the last
-  certified step), `sw run done` and `sw run prove` refuse to certify until the reviewer's
+- **A code step.** When any file but documents or media changed since the run started (or since
+  the step certified before this one started), `sw run done` and `sw run prove` refuse to certify until the reviewer's
   verdict is logged, whatever the check command was. A passing check proves the test, not the
   contract: the reviewer reads the changed files against what they
   document (docstrings, comments, README) and fails the step when a documented behaviour is
@@ -58,7 +58,7 @@ small model that sees the packet and nothing else, so it costs cents:
 
 When a command can't decide it, run `sw run review latest N` and give the reviewer that
 packet and nothing else: it holds the goal, the must-nots, the step and its check, the diff
-since the last snapshot (new files included) and the latest check output, and it leaves out
+since the snapshot that opened the step (new files included) and the latest check output, and it leaves out
 what the worker said. The packet ends with the brief ("Start from FAIL. Pass only what the
 changes and the output prove; list each requirement of the check as pass or fail with the
 evidence") and

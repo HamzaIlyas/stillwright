@@ -911,9 +911,8 @@ fn git_top_of(dir: &Path) -> Option<String> {
 }
 
 /// Hash of the work for a run: a content hash (`dir:<sha256>`) over exactly the files the review
-/// covers (`walk_files` of the review root: git's listing inside a repository, a walk outside),
-/// joined with the current folder's when sw runs somewhere else, so a receipt binds the work
-/// wherever the check was run from and what the hash binds is what the reviewer sees.
+/// covers (`walk_files` of the review root: git's listing inside a repository, a walk outside).
+/// sw refuses from a sibling folder, so what the hash binds is always what the reviewer sees.
 fn worktree_hash_for(run: &Path) -> Result<String> {
     let root = review_root(run)?;
     let here = std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
@@ -975,7 +974,8 @@ fn walk_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
     let root_s = root.to_string_lossy().into_owned();
     let state = state_root().ok().and_then(|s| fs::canonicalize(s).ok());
     if git(Some(&root_s), &[], &["rev-parse", "--show-toplevel"]).is_some() {
-        let tracked = git(Some(&root_s), &[], &["ls-files", "-z"]);
+        let tracked = git(Some(&root_s), &[], &["ls-files", "-z", "--recurse-submodules"])
+            .or_else(|| git(Some(&root_s), &[], &["ls-files", "-z"]));
         let untracked = git(Some(&root_s), &[], &["ls-files", "-o", "--exclude-standard", "-z"]);
         if let (Some(tracked), Some(untracked)) = (tracked, untracked) {
             let state_rel = state.as_ref().and_then(|st| {
@@ -983,15 +983,18 @@ fn walk_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
             });
             let in_state = |rel: &str| state_rel.as_deref().is_some_and(|sr| rel == sr || rel.starts_with(&format!("{sr}/")));
             // Tracked files are the work, whatever they are called; a tracked log is a fixture.
-            // A tracked folder is a submodule: its files are walked like a plain folder.
+            // Submodule files come with --recurse-submodules; a tracked symlink to a folder is not
+            // followed (git tracks the link, not the folder).
             for rel in tracked.split('\0').filter(|r| !r.is_empty()) {
                 let path = root.join(rel);
                 if in_state(rel) || rel.split('/').any(|seg| seg == ".git") {
                     continue;
                 }
+                let is_link = fs::symlink_metadata(&path).map(|m| m.file_type().is_symlink()).unwrap_or(false);
                 if path.is_file() {
                     files.push((rel.to_string(), path));
-                } else if path.is_dir() {
+                } else if path.is_dir() && !is_link {
+                    // An older git without --recurse-submodules: walk the submodule.
                     let mut inner = Vec::new();
                     walk_plain(&path, &path, state.as_deref(), &mut inner);
                     for (sub_rel, sub_path) in inner {
@@ -1000,11 +1003,23 @@ fn walk_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
                 }
             }
             // Untracked files pass the noise filter: hosts and tools write logs, caches and
-            // settings during any run, and none of that is the work.
+            // settings during any run, and none of that is the work. An untracked folder is a
+            // nested repository, walked like a plain folder.
             for rel in untracked.split('\0').filter(|r| !r.is_empty()) {
+                let rel = rel.trim_end_matches('/');
                 let path = root.join(rel);
-                if path.is_file() && !in_state(rel) && !noise_path(rel, true) {
+                if in_state(rel) || noise_path(rel, true) {
+                    continue;
+                }
+                let is_link = fs::symlink_metadata(&path).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+                if path.is_file() {
                     files.push((rel.to_string(), path));
+                } else if path.is_dir() && !is_link {
+                    let mut inner = Vec::new();
+                    walk_plain(&path, &path, state.as_deref(), &mut inner);
+                    for (sub_rel, sub_path) in inner {
+                        files.push((format!("{rel}/{sub_rel}"), sub_path));
+                    }
                 }
             }
             files.sort();
@@ -1103,7 +1118,6 @@ fn dir_manifest(root: &Path) -> Result<BTreeMap<String, String>> {
 /// A step's review covers what changed since the later of the two. Above MANIFEST_MAX files the
 /// manifest is not taken and every command step needs the review, since nothing can say what changed.
 const START_MANIFEST: &str = "files-start.json";
-const CERTIFIED_MANIFEST: &str = "files-certified.json";
 const MANIFEST_MAX: usize = 20_000;
 
 /// The start manifest for `cwd`: (status, files). Never fails: a huge folder gives none.
@@ -1203,14 +1217,26 @@ fn review_files(run: &Path, step: &str) -> Result<Option<Vec<String>>> {
         .find(|e| event_is(e, "event", "start"))
         .and_then(|e| e.get("manifest").map(value_str))
         .unwrap_or_default();
-    // The base a step answers against: its own snapshot when one was taken, else the last
-    // certified step, else the start of the run.
+    // The base a step answers against: its own snapshot when one moved the base, else the newest
+    // step certified before this step's first receipt (a step certified while this one was
+    // already under way cannot absorb its changes), else the start of the run.
     let base_path = if snapshot_manifest(run, step).exists() {
         snapshot_manifest(run, step)
-    } else if run.join(CERTIFIED_MANIFEST).exists() {
-        run.join(CERTIFIED_MANIFEST)
     } else {
-        run.join(START_MANIFEST)
+        let events = log_events(run)?;
+        let first_receipt = events
+            .iter()
+            .position(|e| event_is(e, "event", "receipt") && event_is(e, "step", step))
+            .unwrap_or(events.len());
+        let certified_before = events
+            .iter()
+            .take(first_receipt)
+            .rev()
+            .find(|e| e.get("certified") == Some(&serde_json::Value::Bool(true)) && e.contains_key("manifest"))
+            .and_then(|e| e.get("manifest").map(value_str))
+            .map(|name| run.join(name))
+            .filter(|p| p.exists());
+        certified_before.unwrap_or_else(|| run.join(START_MANIFEST))
     };
     let Ok(text) = fs::read_to_string(&base_path) else {
         if status.is_empty() {
@@ -1227,16 +1253,15 @@ fn review_files(run: &Path, step: &str) -> Result<Option<Vec<String>>> {
     };
     let base: BTreeMap<String, String> = serde_json::from_str(&text).unwrap_or_default();
     let root = review_root(run)?;
-    let in_git = git_top_of(&root).is_some();
     let now = dir_manifest(&root)?;
     let mut changed = Vec::new();
     for (path, hash) in &now {
-        if base.get(path) != Some(hash) && needs_review_path(path, in_git) {
+        if base.get(path) != Some(hash) && needs_review_path(path) {
             changed.push(path.clone());
         }
     }
     for path in base.keys() {
-        if !now.contains_key(path) && needs_review_path(path, in_git) {
+        if !now.contains_key(path) && needs_review_path(path) {
             changed.push(format!("{path} (removed)"));
         }
     }
@@ -1245,15 +1270,14 @@ fn review_files(run: &Path, step: &str) -> Result<Option<Vec<String>>> {
 
 /// What a reviewer must hold against the contract: every bound file except documents and media.
 /// Data files, env files, templates and scripts change behaviour; a README does not.
-fn needs_review_path(rel: &str, in_git: bool) -> bool {
+fn needs_review_path(rel: &str) -> bool {
     const DOC_EXT: &[&str] = &[".md", ".rst", ".adoc", ".markdown"];
     const MEDIA_EXT: &[&str] = &[
-        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".pdf", ".woff", ".woff2", ".ttf",
-        ".otf", ".mp4", ".mp3", ".wav", ".zip", ".gz", ".tar", ".whl", ".jar",
+        ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".pdf", ".woff", ".woff2", ".ttf",
+        ".otf", ".mp4", ".mp3", ".wav",
     ];
     // The manifests hold bound files only (`walk_files` already left noise out), so everything
     // here is the work; git's tracked files are the work whatever they are called.
-    let _ = in_git;
     if is_test_path(rel) {
         return true;
     }
@@ -1428,7 +1452,10 @@ fn run_snapshot(run: &Path, step: &str) -> Result<()> {
     // for review: a snapshot taken after the work must not take the work out of the review.
     let pending = !matches!(review_files(run, step)?, Some(ref v) if v.is_empty());
     let failed = matches!(review_verdict(run, step)?, Some((ref v, _, _)) if v == "fail");
-    if pending || failed {
+    let moved_base = !(pending || failed);
+    if failed {
+        eprintln!("note: the reviewer failed step {step} and no later verdict passed it, so this snapshot does not move its review base");
+    } else if pending {
         eprintln!("note: files changed since the last review base, so this snapshot does not move the review base for step {step}");
     } else if let Ok(m) = dir_manifest(&root) {
         if let Ok(text) = serde_json::to_string(&m) {
@@ -1445,6 +1472,7 @@ fn run_snapshot(run: &Path, step: &str) -> Result<()> {
     let mut event = serde_json::Map::new();
     event.insert("event".into(), "snapshot".into());
     event.insert("step".into(), step.into());
+    event.insert("moved_base".into(), moved_base.into());
     event.insert("commit".into(), commit.clone().into());
     append_json(run, event)?;
     println!(
@@ -1927,6 +1955,15 @@ fn run_done(store: &Store, run: &Path, step: &str) -> Result<()> {
     event.insert("certified".into(), true.into());
     event.insert("check".into(), cmd.clone().into());
     event.insert("tree".into(), tree.clone().into());
+    // What the folder held when this step was certified: the base for steps that start later.
+    if let Ok(m) = dir_manifest(&root) {
+        if let Ok(text) = serde_json::to_string(&m) {
+            let name = format!("files-certified-{step}.json");
+            if fs::write(run.join(&name), text).is_ok() {
+                event.insert("manifest".into(), name.into());
+            }
+        }
+    }
     if let Some(ts) = receipt.get("ts") {
         event.insert("receipt".into(), ts.clone());
     }
@@ -1941,11 +1978,6 @@ fn run_done(store: &Store, run: &Path, step: &str) -> Result<()> {
         event.insert("snapshot".into(), commit.into());
     }
     append_json(run, event)?;
-    if let Ok(m) = dir_manifest(&root) {
-        if let Ok(text) = serde_json::to_string(&m) {
-            let _ = fs::write(run.join(CERTIFIED_MANIFEST), text);
-        }
-    }
     let _ = write_baseline_forced(store, &root);
     println!(
         "step {step}: done, certified (`{cmd}` exit 0 on tree {})",
@@ -2153,10 +2185,16 @@ fn review_base(top: &str, run: &Path, step: &str) -> Option<(String, String)> {
         )
         .is_some()
     };
+    // A snapshot taken while changes or a FAIL were pending did not move the review base, and
+    // the diff must not start from it either.
     let before = events
         .iter()
         .rev()
-        .find(|e| event_is(e, "event", "snapshot") && event_is(e, "step", step))
+        .find(|e| {
+            event_is(e, "event", "snapshot")
+                && event_is(e, "step", step)
+                && e.get("moved_base") != Some(&serde_json::Value::Bool(false))
+        })
         .and_then(|e| e.get("commit").map(value_str))
         .filter(|c| exists(c));
     if let Some(commit) = before {

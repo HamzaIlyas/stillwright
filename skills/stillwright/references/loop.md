@@ -38,8 +38,8 @@ The short form is in SKILL.md. This is the detail a long or unusual run needs.
   receipt (exit code, output hash, tree hash). `sw run done latest N` certifies: it refuses a
   failed receipt, a tampered frozen file, a receipt from another directory, a changed check
   command, a stale tree, and a code step without its review verdict. `sw run prove` is both.
-- **Code steps.** The plugin's SessionStart hook records a baseline of the folder at session start (`sw run baseline` does it on other hosts: run it once when the session starts, before any edit; it refuses to overwrite a fresh one), so a file edited before `sw run new` still counts as changed. When code or test files changed since the run started (or since the last certified
-  step), certification needs the reviewer's verdict in `checks/step-N-review.md`, logged with
+- **Code steps.** The plugin's SessionStart hook records a baseline of the folder at session start (`sw run baseline` does it on other hosts: run it once when the session starts, before any edit; it refuses to overwrite a fresh one), so a file edited before `sw run new` still counts as changed. When files changed since the run started (or since the last certified
+  step; every bound file counts, documents and media excepted), certification needs the reviewer's verdict in `checks/step-N-review.md`, logged with
   `sw run log latest step=N result=pass|fail evidence=<that file>` after the check it certifies;
   a later change means a new check and a new review. The check command's wording does not matter:
   the agent writes it. Untracked logs, transcripts and host folders are neither hashed nor source;

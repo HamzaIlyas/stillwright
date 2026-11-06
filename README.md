@@ -84,7 +84,7 @@ number comes from the same tasks and is published either way. Notes, data and ev
 verdict: [docs/evals.md](docs/evals.md) (the 2026-11 pilot notes are listed there) and the
 [Hugging Face dataset](https://huggingface.co/datasets/Folvix/stillwright-evals).
 
-The gate itself is tested: 235 black-box tests drive the binary on Linux, macOS and Windows in
+The gate itself is tested: 245 black-box tests drive the binary on Linux, macOS and Windows in
 CI, including the ways two independent reviews found to get past it before release.
 
 ## Install
