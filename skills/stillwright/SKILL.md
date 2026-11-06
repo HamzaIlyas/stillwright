@@ -29,7 +29,7 @@ lists every command. No `sw` on PATH: ask once, then `scripts/get-sw.sh`; unatte
 6. **Every change gets a run.** Only a goal that changes nothing (a question, a look-up) is
    answered without one. A change where a test suite, build, lint or named command exists gets
    a `check: $` step with that command verbatim, however small the fix.
-7. **State lives in files.** Anything a new session needs is under `~/.stillwright`.
+7. **State lives in files**, under `~/.stillwright`.
 
 ## The loop
 
