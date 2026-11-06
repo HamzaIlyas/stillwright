@@ -875,36 +875,42 @@ fn tree_of_worktree(top: &str, keep_objects: bool) -> Result<String> {
 /// Stage the working tree into the store's index and write it as a tree object.
 fn stage_tree(top: &str, store: &TempStore) -> Result<String> {
     let envs = store.envs();
-    let mut owned: Vec<String> = vec!["add".into(), "-A".into(), "--".into(), ".".into()];
+    let mut add = vec!["add", "-A", "--", "."];
+    let exclude;
     if let Ok(state) = state_root().and_then(|s| fs::canonicalize(s).map_err(|e| e.to_string())) {
         if let Ok(top_real) = fs::canonicalize(top) {
             if let Ok(rel) = state.strip_prefix(&top_real) {
-                owned.push(format!(":(exclude){}", rel.to_string_lossy().replace('\\', "/")));
+                exclude = format!(":(exclude){}", rel.to_string_lossy().replace('\\', "/"));
+                add.push(&exclude);
             }
         }
     }
-    // Host folders and noise files are not the work: they must not make a receipt stale.
+    git(Some(top), &envs, &add).ok_or_else(|| {
+        format!(
+            "git could not read the working tree at {top} (`git add -A` failed: an unreadable file, permissions, or safe.directory?)"
+        )
+    })?;
+    // Host folders and noise files are not the work: they must not make a receipt stale. They
+    // are dropped from the temporary index afterwards (an exclude pathspec on `git add` errors
+    // when it happens to name an ignored path).
+    let mut drop: Vec<String> = vec!["rm".into(), "-r".into(), "--cached".into(), "-q".into(), "--ignore-unmatch".into(), "--".into()];
     for d in HOST_DIRS_ANYWHERE {
-        owned.push(format!(":(exclude){d}"));
-        owned.push(format!(":(exclude)*/{d}"));
+        drop.push(format!(":(glob){d}/**"));
+        drop.push(format!(":(glob)**/{d}/**"));
+        drop.push(d.to_string());
+        drop.push(format!(":(glob)**/{d}"));
     }
     for e in NOISE_EXT {
-        owned.push(format!(":(exclude)*{e}"));
+        drop.push(format!(":(glob)**/*{e}"));
+        drop.push(format!("*{e}"));
     }
     for n in NOISE_NAMES {
-        owned.push(format!(":(exclude){n}"));
-        owned.push(format!(":(exclude)*/{n}"));
+        drop.push(n.to_string());
+        drop.push(format!(":(glob)**/{n}"));
     }
-    let add: Vec<&str> = owned.iter().map(String::as_str).collect();
-    git(Some(top), &envs, &add)
-        .ok_or_else(|| {
-            format!(
-                "git could not read the working tree at {top} (`git add -A` failed: an unreadable file, permissions, or safe.directory?)"
-            )
-        })
-        .and_then(|_| {
-            git(Some(top), &envs, &["write-tree"]).ok_or_else(|| "git write-tree failed".to_string())
-        })
+    let drop_args: Vec<&str> = drop.iter().map(String::as_str).collect();
+    let _ = git(Some(top), &envs, &drop_args);
+    git(Some(top), &envs, &["write-tree"]).ok_or_else(|| "git write-tree failed".to_string())
 }
 
 /// The folder a run answers for: the repository top when the run was opened inside one (the
@@ -2289,7 +2295,9 @@ fn print_changed_sources(run: &Path, token: &str) -> Result<()> {
     println!(
         "For each of them, answer first: what does the file document (docstrings, comments, README) \
          that the check did not exercise, and does the code deliver it? A documented behaviour left \
-         broken or unimplemented is FAIL. Name every file in the verdict."
+         broken or unimplemented is FAIL, and so is a reported symptom whose cause is still there. An \
+         edge the file does not promise is a note, not a FAIL: judge the contract, not what you would add. \
+         Name every file in the verdict."
     );
     let cwd = review_root(run).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     for rel in &changed {

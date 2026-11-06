@@ -36,7 +36,9 @@ small model that sees the packet and nothing else, so it costs cents:
   verdict is logged, whatever the check command was. A passing check proves the test, not the
   contract: the reviewer reads the changed files against what they
   document (docstrings, comments, README) and fails the step when a documented behaviour is
-  left broken or unimplemented, or when the reported symptom's cause is still there. This is
+  left broken or unimplemented, or when the reported symptom's cause is still there. An edge the
+  file does not promise (an input type nobody documented, a limit nobody set) is a note in the
+  verdict, not a FAIL: the reviewer judges the contract, not what it would have added. This is
   the case the 2026-11-06 measurement found: an agent fixes the ticket, passes the visible
   test, and leaves the documented second defect unmentioned.
 - **Work no command can judge** (prose, research, design): the verdict is the pass.

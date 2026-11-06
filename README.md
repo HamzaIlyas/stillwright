@@ -78,8 +78,8 @@ visible test and left a documented second defect in the same file in 5 of 30 run
 2. The 0.2 skill measured against that baseline on the same ten tasks: 1.85x the cost per
 verified pass (interval 1.74 to 2.08) and one pass fewer (24 against 25), because its receipt
 certified the same visible test and the reviewer never ran. 0.3 is the answer to that
-measurement: three sw calls per small task, a shorter skill, and a code step that cannot be
-certified without a reviewer's verdict naming every changed file. Its own
+measurement: three sw calls per small task, a shorter skill, and a code step that `sw` will not
+certify without a reviewer's verdict, logged after the check and naming every changed file. Its own
 number comes from the same tasks and is published either way. Notes, data and every run's
 verdict: [docs/evals.md](docs/evals.md) and the
 [Hugging Face dataset](https://huggingface.co/datasets/Folvix/stillwright-evals).
