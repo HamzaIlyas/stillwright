@@ -1186,10 +1186,6 @@ fn baseline_path(store: &Store, cwd: &Path) -> PathBuf {
     store.root.join("baselines").join(format!("{}.json", &digest[..16]))
 }
 
-fn write_baseline_forced(store: &Store, cwd: &Path) -> Result<usize> {
-    write_baseline(store, cwd)
-}
-
 /// A snapshot commit of `top` under `refs/sw/baseline/<key>`: the diff base of a run opened on
 /// this baseline, so the packet shows what changed since the session began, removals included.
 fn baseline_commit(top: &str, key: &str) -> Option<String> {
@@ -2045,7 +2041,7 @@ fn run_done(store: &Store, run: &Path, step: &str) -> Result<()> {
         event.insert("snapshot".into(), commit.into());
     }
     append_json(run, event)?;
-    let _ = write_baseline_forced(store, &root);
+    let _ = write_baseline(store, &root);
     println!(
         "step {step}: done, certified (`{cmd}` exit 0 on tree {})",
         short(&tree)
@@ -2732,7 +2728,6 @@ fn run_brief(store: &Store, hook: bool) -> Result<()> {
     let event = hook.then(hook_event_on_stdin).flatten();
     let printed = print_brief(store);
     if let Some(event) = event {
-        let source = event.get("source").map(value_str).unwrap_or_default();
         let dir = event
             .get("cwd")
             .map(value_str)
@@ -2742,12 +2737,10 @@ fn run_brief(store: &Store, hook: bool) -> Result<()> {
         if let Some(dir) = dir {
             let dir = git_top_of(&dir).map(PathBuf::from).unwrap_or(dir);
             let fresh = fresh_baseline(store, &dir).ok().flatten().is_some();
-            let _ = &fresh;
             // A fresh baseline is kept whatever the event says: the event is text anyone can send.
             // `sw run done` and `sw run finish` renew it; otherwise it lapses after BASELINE_HOURS.
-            let _ = source;
             if dir.is_dir() && !fresh {
-                let _ = write_baseline_forced(store, &dir);
+                let _ = write_baseline(store, &dir);
             }
         }
     }
@@ -3874,11 +3867,22 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             // session baseline's snapshot when the run uses one, else at a snapshot of the tree as
             // the run opens; either way the worker's own commits cannot empty it.
             if let Some(top) = git_top_of(Path::new(&cwd)) {
+                let had_baseline = baseline_commit.is_some();
                 let from_baseline = baseline_commit.filter(|c| {
                     git(Some(&top), &[], &["rev-parse", "--verify", "-q", &format!("{c}^{{commit}}")]).is_some()
                 });
+                if had_baseline && from_baseline.is_none() {
+                    eprintln!("warning: the session baseline's snapshot commit is gone; this run's diff starts at a snapshot taken now, its review list at the baseline");
+                }
                 let commit = match from_baseline {
-                    Some(c) => Ok(c),
+                    // Pinned under the run's own ref: the baseline ref is overwritten by later
+                    // baselines, and gc must not take this commit with it.
+                    Some(c) => {
+                        let label = free_label(&top, &dir, "start");
+                        git(Some(&top), &[], &["update-ref", &snapshot_ref(&dir, &label), &c])
+                            .map(|_| c.clone())
+                            .ok_or_else(|| format!("cannot pin the baseline snapshot {}", short(&c)))
+                    }
                     None => {
                         let label = free_label(&top, &dir, "start");
                         take_snapshot(&top, &dir, &label, "sw snapshot at run start")
@@ -3964,7 +3968,7 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
             store.save("inbox.json", &cards)?;
             append_event(&dir, &[("event".into(), "finish".into()), ("card".into(), id.to_string())])?;
             if let Ok(root) = review_root(&dir) {
-                let _ = write_baseline_forced(store, &root);
+                let _ = write_baseline(store, &root);
             }
             println!("inbox {id} (notify) added{closed}");
         }
