@@ -2451,10 +2451,11 @@ fn print_changed_sources(run: &Path, step: &str, token: &str) -> Result<()> {
     );
     println!(
         "For each of them, answer first: what does the file document (docstrings, comments, README) \
-         that the check did not exercise, and does the code deliver it? A documented behaviour left \
-         broken or unimplemented is FAIL, and so is a reported symptom whose cause is still there. An \
-         edge the file does not promise is a note, not a FAIL: judge the contract, not what you would add. \
-         Name every file in the verdict."
+         that the check did not exercise, and does the code deliver it? FAIL means one of two things: a \
+         documented behaviour is broken or unimplemented, or the reported symptom is still there in the \
+         ticket's own scenario. Anything else you would improve (float rounding at a boundary, input \
+         types nobody documented, limits nobody set, style) is a note under the PASS, never a FAIL: judge \
+         the contract, not what you would add. Name every file in the verdict."
     );
     let cwd = review_root(run).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     for rel in &changed {
