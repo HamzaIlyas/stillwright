@@ -227,10 +227,29 @@ enum GoalCmd {
 
 #[derive(Subcommand)]
 enum RunCmd {
+    /// Open a run. `--goal` takes a goal id or the text of a new goal; `--plan <file|->` writes
+    /// plan.md from a file or stdin; `--freeze <paths>` records the hashes of the files the
+    /// checks depend on. One call opens, plans and freezes a small task.
     New {
         slug: String,
         #[arg(long)]
-        goal: Option<u64>,
+        goal: Option<String>,
+        #[arg(long)]
+        plan: Option<String>,
+        #[arg(long, num_args = 1..)]
+        freeze: Vec<String>,
+    },
+    /// `sw run check` then `sw run done` in one call: the receipt is written even when the
+    /// certificate is refused (a failing check, a code step still waiting for its reviewer).
+    Prove {
+        run: String,
+        step: String,
+    },
+    /// Close the run's goal and add one notify card with the text given, once every step has
+    /// passed. Refused while a step is unproven.
+    Finish {
+        run: String,
+        text: String,
     },
     /// Append key=value pairs to a run's log (run: an id, a path, or "latest")
     Log {
@@ -855,12 +874,184 @@ fn stage_tree(top: &str, store: &TempStore) -> Result<String> {
         })
 }
 
-/// Hash of the working tree; "none" outside a repository, an error when git fails inside one.
+/// Hash of the working tree: git's tree hash inside a repository, an error when git fails
+/// there, and outside one a content hash of the working directory (`dir:<sha256>`), so a receipt
+/// binds the files even where there is no repository.
 fn worktree_hash() -> Result<String> {
     match git_top() {
         Some(top) => tree_of_worktree(&top, false),
-        None => Ok("none".into()),
+        None => {
+            let cwd = std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
+            Ok(format!("dir:{}", dir_hash(&cwd)?))
+        }
     }
+}
+
+/// Folders left out of a working-directory hash: build output, dependency trees and caches
+/// change without the work changing. The state folder is left out too when it sits inside.
+const DIR_HASH_SKIP: &[&str] = &[
+    "node_modules", "target", ".venv", "venv", ".tox", ".pytest_cache", ".mypy_cache",
+    ".ruff_cache", ".cache", ".sw-home",
+];
+
+/// Every file under `root` as (relative path, path), sorted; symlinks by their target path,
+/// never followed; HASH_SKIP, DIR_HASH_SKIP and the state folder left out.
+fn walk_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let state = state_root().ok().and_then(|s| fs::canonicalize(s).ok());
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    fn walk(root: &Path, dir: &Path, state: Option<&Path>, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
+        for entry in fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            let name = file_name(&path);
+            if HASH_SKIP.contains(&name.as_str()) || DIR_HASH_SKIP.contains(&name.as_str()) {
+                continue;
+            }
+            let meta = fs::symlink_metadata(&path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+            if meta.file_type().is_symlink() {
+                let target = fs::read_link(&path).map_err(|e| e.to_string())?;
+                out.push((rel_path(root, &path) + " -> " + &target.to_string_lossy(), PathBuf::new()));
+            } else if meta.is_dir() {
+                if let Some(state) = state {
+                    if fs::canonicalize(&path).ok().as_deref() == Some(state) {
+                        continue;
+                    }
+                }
+                walk(root, &path, state, out)?;
+            } else if meta.is_file() {
+                out.push((rel_path(root, &path), path));
+            }
+        }
+        Ok(())
+    }
+    walk(root, root, state.as_deref(), &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+/// sha256 over every file under `root` (relative path, then content), in `walk_files` order.
+fn dir_hash(root: &Path) -> Result<String> {
+    let mut digest = Sha256::new();
+    for (rel, file) in walk_files(root)? {
+        let bytes = if file.as_os_str().is_empty() {
+            Vec::new()
+        } else {
+            fs::read(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?
+        };
+        digest.update(rel.as_bytes());
+        digest.update([0u8]);
+        digest.update(&bytes);
+        digest.update([0u8]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+/// Relative path -> sha256 of its content, for every file under `root`.
+fn dir_manifest(root: &Path) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for (rel, file) in walk_files(root)? {
+        let bytes = if file.as_os_str().is_empty() {
+            Vec::new()
+        } else {
+            fs::read(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?
+        };
+        out.insert(rel, format!("{:x}", Sha256::digest(&bytes)));
+    }
+    Ok(out)
+}
+
+/// The manifest `sw run new` writes: what the working directory held when the run started, so
+/// a later step can tell which source files it changed. Skipped above MANIFEST_MAX files (a run
+/// opened in a home folder); then no contract review is required, and the packet says so.
+const START_MANIFEST: &str = "files-start.json";
+const MANIFEST_MAX: usize = 20_000;
+
+fn write_start_manifest(run: &Path, cwd: &Path) -> Result<()> {
+    let files = walk_files(cwd)?;
+    if files.len() > MANIFEST_MAX {
+        return Ok(());
+    }
+    let manifest = dir_manifest(cwd)?;
+    let text = serde_json::to_string(&manifest).map_err(|e| e.to_string())?;
+    fs::write(run.join(START_MANIFEST), text).map_err(|e| format!("cannot write the start manifest: {e}"))
+}
+
+/// Source files (tests left out) added, changed or removed since the run started, relative to
+/// the folder the run was opened in. Empty when the run has no start manifest.
+fn changed_source_files(run: &Path) -> Result<Vec<String>> {
+    let Ok(text) = fs::read_to_string(run.join(START_MANIFEST)) else {
+        return Ok(Vec::new());
+    };
+    let start: BTreeMap<String, String> = serde_json::from_str(&text).unwrap_or_default();
+    let Some(cwd) = run_cwd(run) else {
+        return Ok(Vec::new());
+    };
+    let now = dir_manifest(Path::new(&cwd))?;
+    let mut changed = Vec::new();
+    for (path, hash) in &now {
+        if start.get(path) != Some(hash) && !is_test_path(path) {
+            changed.push(path.clone());
+        }
+    }
+    for path in start.keys() {
+        if !now.contains_key(path) && !is_test_path(path) {
+            changed.push(format!("{path} (removed)"));
+        }
+    }
+    Ok(changed)
+}
+
+/// Test files by the usual conventions: a tests/test/__tests__/spec folder, test_*.py, *_test.py,
+/// *.test.*, *.spec.*, conftest.py.
+fn is_test_path(rel: &str) -> bool {
+    let lower = rel.to_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower).to_string();
+    lower
+        .split('/')
+        .any(|seg| matches!(seg, "tests" | "test" | "__tests__" | "spec" | "specs"))
+        || name.starts_with("test_")
+        || name.ends_with("_test.py")
+        || name.ends_with("_test.go")
+        || name.contains(".test.")
+        || name.contains(".spec.")
+        || name == "conftest.py"
+}
+
+/// Does this check run a test suite? Word sequences of the common runners, anywhere in the
+/// command (`python -m pytest tests`, `npm test`, `cargo test --all`).
+fn is_test_command(cmd: &str) -> bool {
+    const RUNNERS: &[&str] = &[
+        "pytest", "unittest", "npm test", "pnpm test", "yarn test", "bun test", "cargo test",
+        "go test", "jest", "vitest", "mocha", "phpunit", "rspec", "make test", "make check",
+        "tox", "nox", "dotnet test", "mvn test", "gradle test", "gradlew test", "swift test",
+        "mix test", "ctest", "deno test",
+    ];
+    let words: Vec<String> = cmd
+        .split(|c: char| c.is_whitespace() || c == ';' || c == '&' || c == '|' || c == '(' || c == ')')
+        .filter(|w| !w.is_empty())
+        .map(|w| w.rsplit('/').next().unwrap_or(w).to_string())
+        .collect();
+    RUNNERS.iter().any(|runner| {
+        let parts: Vec<&str> = runner.split(' ').collect();
+        words.windows(parts.len()).any(|w| w.iter().zip(&parts).all(|(a, b)| a == b))
+    })
+}
+
+/// The latest reviewer verdict logged for a step, with the tree it was given on.
+fn review_verdict(run: &Path, step: &str) -> Result<Option<(String, String)>> {
+    Ok(log_events(run)?
+        .iter()
+        .rev()
+        .find(|e| event_is(e, "step", step) && e.contains_key("review"))
+        .map(|e| {
+            (
+                e.get("review").map(value_str).unwrap_or_default(),
+                e.get("tree").map(value_str).unwrap_or_default(),
+            )
+        }))
+}
+
+fn verdict_file(run: &Path, step: &str) -> PathBuf {
+    run.join("checks").join(format!("step-{step}-review.md"))
 }
 
 /// Commit the working tree as a snapshot under `refs/sw/<run>/<label>`; the user's branch,
@@ -1344,7 +1535,7 @@ fn run_done(store: &Store, run: &Path, step: &str) -> Result<()> {
     }
     if git_top().is_none() {
         eprintln!(
-            "warning: no git repository here, so the receipt is not tied to the files; anything may have changed since the check"
+            "note: no git repository here: the receipt binds a hash of this folder's files (build output and caches left out); snapshots and rewind are unavailable"
         );
     }
     let ran = receipt.get("cmd").map(value_str).unwrap_or_default();
@@ -1361,6 +1552,36 @@ fn run_done(store: &Store, run: &Path, step: &str) -> Result<()> {
             short(&then),
             short(&tree)
         ));
+    }
+    if is_test_command(&cmd) {
+        let changed = changed_source_files(run)?;
+        if !changed.is_empty() {
+            let name = file_name(run);
+            let verdict = verdict_file(run, step);
+            match review_verdict(run, step)? {
+                Some((v, t)) if v == "pass" && t == tree => {}
+                Some((v, _)) if v == "fail" => {
+                    return Err(format!(
+                        "step {step}: the reviewer failed it; fix the work, run `sw run check {name} {step}`, review again, then `sw run done`"
+                    ))
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "step {step}: the review verdict was given on an earlier state of the files; run `sw run review {name} {step}` again, log the new verdict, then `sw run done`"
+                    ))
+                }
+                None => {
+                    return Err(format!(
+                        "step {step}: {} changed since the run started and the check is the test suite; a passing suite is not the whole contract. \
+                         Run `sw run review {name} {step}`, give the packet to a fresh read-only reviewer on the small model (sw-verify), \
+                         have it write the verdict to {}, log it with `sw run log {name} step={step} result=pass|fail evidence=\"{}\"`, then `sw run done` again.",
+                        changed.join(", "),
+                        verdict.display(),
+                        verdict.display()
+                    ))
+                }
+            }
+        }
     }
     note_plan(run)?;
     let mut event = serde_json::Map::new();
@@ -1706,9 +1927,10 @@ fn run_review(run: &Path, step: &str) -> Result<()> {
     match git_top() {
         Some(top) => print_changes(&top, run, step, &token)?,
         None => println!(
-            "\nChanges: no git repository here, so there is no diff; open the files the step names."
+            "\nChanges: no git repository here, so there is no diff; the source files changed since the run started follow."
         ),
     }
+    print_changed_sources(run, &token)?;
     if let Some(receipt) = latest_receipt(run, step)? {
         let name = receipt.get("log").map(value_str).unwrap_or_default();
         let cmd = receipt.get("cmd").map(value_str).unwrap_or_default();
@@ -1735,12 +1957,51 @@ fn run_review(run: &Path, step: &str) -> Result<()> {
     let verdict = checks.join(format!("step-{step}-review.md"));
     println!(
         "\nStart from FAIL. Pass only what the changes and the output prove; list each requirement \
-         of the check as pass or fail with the evidence. Write the verdict to {} and log it with \
+         of the check as pass or fail with the evidence. Then list what the changed files document \
+         (docstrings, comments, README) that the check did not exercise: a documented behaviour \
+         left broken or unimplemented is FAIL, and so is a reported symptom whose cause is still \
+         there. Write the verdict to {} and log it with \
          `sw run log {} step={step} result=pass|fail evidence=\"{}\"`.",
         verdict.display(),
         file_name(run),
         verdict.display()
     );
+    Ok(())
+}
+
+/// The source files a step changed since the run started, with their current content when
+/// short, so a reviewer can hold the change against what the file documents.
+fn print_changed_sources(run: &Path, token: &str) -> Result<()> {
+    if !run.join(START_MANIFEST).exists() {
+        println!("\nSource files changed since the run started: unknown (no start manifest; the run was opened in a folder too large to list)");
+        return Ok(());
+    }
+    let changed = changed_source_files(run)?;
+    if changed.is_empty() {
+        println!("\nSource files changed since the run started (tests left out): none");
+        return Ok(());
+    }
+    println!(
+        "\nSource files changed since the run started (tests left out): {}",
+        changed.join(", ")
+    );
+    let cwd = run_cwd(run).unwrap_or_default();
+    for rel in &changed {
+        if rel.ends_with(" (removed)") {
+            continue;
+        }
+        let path = Path::new(&cwd).join(rel);
+        match fs::read_to_string(&path) {
+            Ok(text) if text.lines().count() <= PACKET_LINES / 2 => {
+                println!("\n--- {rel}, as it is now ---");
+                println!("{}", fence_begins(token));
+                println!("{}", text.trim_end());
+                println!("{}", fence_ends(token));
+            }
+            Ok(text) => println!("{rel}: {} lines, open it", text.lines().count()),
+            Err(_) => println!("{rel}: not a text file, open it"),
+        }
+    }
     Ok(())
 }
 
@@ -2068,6 +2329,15 @@ fn run_brief(store: &Store) -> Result<()> {
 }
 
 fn run_freeze(run: &Path, paths: &[String]) -> Result<()> {
+    freeze_paths(run, paths)?;
+    println!(
+        "frozen: {}; any change fails the step's check until frozen again",
+        paths.join(", ")
+    );
+    Ok(())
+}
+
+fn freeze_paths(run: &Path, paths: &[String]) -> Result<()> {
     let mut files = serde_json::Map::new();
     for path in paths {
         // Absolute, so the check compares the same files from any directory; not resolved,
@@ -2079,12 +2349,7 @@ fn run_freeze(run: &Path, paths: &[String]) -> Result<()> {
     let mut event = serde_json::Map::new();
     event.insert("event".into(), "freeze".into());
     event.insert("files".into(), files.into());
-    append_json(run, event)?;
-    println!(
-        "frozen: {}; any change fails the step's check until frozen again",
-        paths.join(", ")
-    );
-    Ok(())
+    append_json(run, event)
 }
 
 fn slugify(text: &str) -> String {
@@ -2992,7 +3257,60 @@ fn goal(store: &Store, cmd: GoalCmd) -> Result<()> {
 
 fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
     match cmd {
-        RunCmd::New { slug, goal } => {
+        RunCmd::New {
+            slug,
+            goal,
+            plan,
+            freeze,
+        } => {
+            // The goal first, so a bad id or an empty text refuses before anything is created.
+            let goal_id = match goal.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
+                None => String::new(),
+                Some(g) if g.bytes().all(|b| b.is_ascii_digit()) => {
+                    let goals: Vec<Goal> = store.load("goals.json")?;
+                    let id: u64 = g.parse().map_err(|_| format!("goal id {g} is out of range"))?;
+                    if !goals.iter().any(|x| x.id == id) {
+                        return Err(format!("goal {id} not found (`sw goal list`), or give the goal's text to create it"));
+                    }
+                    g.to_string()
+                }
+                Some(text) => {
+                    let mut goals: Vec<Goal> = store.load("goals.json")?;
+                    let id = next_id(goals.iter().map(|x| x.id));
+                    goals.push(Goal {
+                        id,
+                        text: text.to_string(),
+                        priority: 3,
+                        status: "open".into(),
+                        created: now(),
+                        closed: None,
+                        note: None,
+                    });
+                    store.save("goals.json", &goals)?;
+                    id.to_string()
+                }
+            };
+            let plan_text = match plan.as_deref() {
+                None => None,
+                Some("-") => {
+                    let mut text = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut text)
+                        .map_err(|e| format!("cannot read the plan from stdin: {e}"))?;
+                    Some(text)
+                }
+                Some(path) => Some(
+                    fs::read_to_string(path).map_err(|e| format!("cannot read the plan {path}: {e}"))?,
+                ),
+            };
+            if let Some(text) = &plan_text {
+                if plan_steps(text).is_empty() {
+                    return Err(
+                        "the plan has no step: a step is a numbered line with `| check: <command or what proves it>`"
+                            .into(),
+                    );
+                }
+            }
             let base = format!(
                 "{}-{}",
                 chrono::Local::now().format("%Y%m%d-%H%M%S"),
@@ -3013,18 +3331,80 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                 .and_then(|d| fs::canonicalize(d).ok())
                 .map(|d| d.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            {
-                let goal = goal.map(|g| g.to_string()).unwrap_or_default();
-                append_event(
-                    &dir,
-                    &[
-                        ("event".into(), "start".into()),
-                        ("cwd".into(), cwd),
-                        ("goal".into(), goal),
-                    ],
-                )?;
+            if !cwd.is_empty() {
+                write_start_manifest(&dir, Path::new(&cwd))?;
+            }
+            append_event(
+                &dir,
+                &[
+                    ("event".into(), "start".into()),
+                    ("cwd".into(), cwd),
+                    ("goal".into(), goal_id),
+                ],
+            )?;
+            if let Some(text) = plan_text {
+                fs::write(dir.join("plan.md"), text)
+                    .map_err(|e| format!("cannot write plan.md: {e}"))?;
+            }
+            if !freeze.is_empty() {
+                freeze_paths(&dir, &freeze)?;
             }
             println!("{}", dir.display());
+        }
+        RunCmd::Prove { run, step } => {
+            let dir = store.resolve_run(&run)?;
+            run_check(store, &dir, &step)?;
+            run_done(store, &dir, &step)?;
+        }
+        RunCmd::Finish { run, text } => {
+            let dir = store.resolve_run(&run)?;
+            let name = file_name(&dir);
+            note_plan(&dir)?;
+            let p = Progress::of(&dir);
+            if let Some(step) = &p.next {
+                return Err(format!(
+                    "run {name}: step {step} is not proven; finish after every step passed (`sw run prove {name} {step}`), or log `result=fail` with why and add a notify card by hand"
+                ));
+            }
+            if p.total() == 0 {
+                return Err(format!("run {name} has no plan.md; nothing to finish"));
+            }
+            let goal_id = log_events(&dir)?
+                .iter()
+                .find(|e| event_is(e, "event", "start"))
+                .and_then(|e| e.get("goal").map(value_str))
+                .filter(|g| !g.is_empty())
+                .and_then(|g| g.parse::<u64>().ok());
+            let mut closed = String::new();
+            if let Some(id) = goal_id {
+                let mut goals: Vec<Goal> = store.load("goals.json")?;
+                if let Ok(g) = find(&mut goals, id, |g| g.id) {
+                    if g.status == "open" {
+                        g.status = "done".into();
+                        g.closed = Some(now());
+                        g.note = Some(format!("run {name}"));
+                        closed = format!("; goal {id} done");
+                    }
+                }
+                store.save("goals.json", &goals)?;
+            }
+            let mut cards: Vec<Card> = store.load("inbox.json")?;
+            let id = next_id(cards.iter().map(|c| c.id));
+            cards.push(Card {
+                id,
+                kind: Kind::Notify,
+                title: text,
+                body: String::new(),
+                run: name.clone(),
+                status: "open".into(),
+                created: now(),
+                answer: None,
+                answered: None,
+                closed: None,
+                plan_sha256: plan_hash(&dir),
+            });
+            store.save("inbox.json", &cards)?;
+            println!("inbox {id} (notify) added{closed}");
         }
         RunCmd::Log { run, pairs } => {
             let mut parsed: Vec<(String, String)> = Vec::new();
@@ -3069,11 +3449,33 @@ fn run_cmd(store: &Store, cmd: RunCmd) -> Result<()> {
                 let plan = fs::read_to_string(dir.join("plan.md")).unwrap_or_default();
                 let check = plan_step_check(&plan, &step);
                 let is_command = check.as_deref().and_then(command_check).is_some();
-                if result == "pass" && is_command {
-                    return Err(format!(
-                        "step {step} has a command check; a pass written by hand is not evidence. \
-                         Run `sw run check {run} {step}`, then `sw run done {run} {step}`."
-                    ));
+                if is_command {
+                    let expected = fs::canonicalize(verdict_file(&dir, &step)).ok().map(plain_path);
+                    let given = value("evidence")
+                        .and_then(|v| fs::canonicalize(v.trim()).ok())
+                        .map(plain_path);
+                    if given.is_some() && given == expected {
+                        // The fresh reviewer's verdict on a code step: recorded as `review`, never as
+                        // the step's pass; `sw run done` still needs the receipt and this verdict.
+                        let mut pairs = with_evidence(parsed, &dir, &run, &step)?;
+                        pairs.retain(|(k, _)| k != "result" && k != "check");
+                        pairs.push(("review".into(), result.clone()));
+                        pairs.push(("tree".into(), worktree_hash()?));
+                        note_plan(&dir)?;
+                        append_event(&dir, &pairs)?;
+                        if result == "pass" {
+                            println!("step {step}: review verdict recorded (pass); `sw run done {run} {step}` can certify now");
+                        } else {
+                            println!("step {step}: review verdict recorded (fail); fix the work, check, review again");
+                        }
+                        return Ok(());
+                    }
+                    if result == "pass" {
+                        return Err(format!(
+                            "step {step} has a command check; a pass written by hand is not evidence. \
+                             Run `sw run check {run} {step}`, then `sw run done {run} {step}`."
+                        ));
+                    }
                 }
                 if result == "pass" {
                     require_consent(store, &dir, &step)?;

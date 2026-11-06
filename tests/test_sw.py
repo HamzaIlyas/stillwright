@@ -606,7 +606,7 @@ class CertificateTests(SwTestCase):
         plain.mkdir()
         (self.run / "plan.md").write_text("# Goal: x\n1. a | check: $ true\n")
         self.sw("run", "check", "latest", "1", cwd=plain)
-        self.assertEqual(self.receipts()[-1]["tree"], "none")
+        self.assertTrue(self.receipts()[-1]["tree"].startswith("dir:"))
         self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=plain))
 
 
@@ -1921,3 +1921,247 @@ class ConsentHardeningTests(ConsentCase):
         self.assertEqual(len(token), 8)
         ends = [l for l in out.splitlines() if "end of tool output [" in l]
         self.assertTrue(ends and all(f"[{token}]" in l for l in ends))
+
+
+class NoGitReceiptTests(SwTestCase):
+    """Outside a git repository the receipt binds a hash of the folder's files, so a change after
+    the check is caught there too (pilot 5: every eval receipt carried tree `none`)."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        self.work.mkdir()
+        (self.work / "mod.py").write_text("X = 1\n")
+        run = pathlib.Path(self.sw("run", "new", "nogit", cwd=self.work).strip())
+        (run / "plan.md").write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        self.run = run
+
+    def test_done_refuses_when_a_file_changed_after_the_check(self):
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        (self.work / "mod.py").write_text("X = 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("stale receipt", str(cm.exception))
+
+    def test_done_passes_and_the_receipt_names_a_folder_hash(self):
+        out = self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertNotIn("tree none", out)
+        self.assertIn("tree dir:", out)
+        done = self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("certified", done)
+        events = [json.loads(l) for l in (self.run / "log.jsonl").read_text().splitlines() if l.strip()]
+        trees = {e.get("tree") for e in events if e.get("tree")}
+        self.assertEqual(len(trees), 1)
+        self.assertTrue(next(iter(trees)).startswith("dir:"))
+
+    def test_state_folder_inside_the_work_folder_does_not_make_the_receipt_stale(self):
+        env = {**self.env, "STILLWRIGHT_HOME": str(self.work / ".sw-home")}
+        def sw(*argv):
+            r = subprocess.run([SW, *argv], env=env, capture_output=True, text=True, cwd=self.work)
+            if r.returncode != 0:
+                raise Failed(r.stderr.strip())
+            return r.stdout
+        run = pathlib.Path(sw("run", "new", "inside").strip())
+        (run / "plan.md").write_text("# Goal: g\nMust not: x\n1. a | check: $ true\nOutward: none\n")
+        sw("run", "check", "latest", "1")
+        self.assertIn("certified", sw("run", "done", "latest", "1"))
+
+    def test_done_no_longer_says_the_receipt_is_untied(self):
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        r = subprocess.run([SW, "run", "done", "latest", "1"], env=self.env, capture_output=True, text=True, cwd=self.work)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("not tied to the files", r.stderr)
+        self.assertIn("no git repository", r.stderr)
+
+
+class ContractReviewTests(SwTestCase):
+    """A code step whose check is the test suite is certified only after a fresh reviewer judged
+    the change against what the touched files document (pilot 5: every receipt certified the
+    visible pytest, including shallow fixes)."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        (self.work / "tests").mkdir(parents=True)
+        (self.work / "mod.py").write_text('"""Pages are numbered from 1; out of range raises IndexError."""\n\ndef page_count(n, size):\n    return n // size + 1\n')
+        (self.work / "tests" / "test_mod.py").write_text("import unittest\nfrom mod import page_count\n\nclass T(unittest.TestCase):\n    def test_count(self):\n        self.assertEqual(page_count(11, 5), 3)\n")
+        self.run = pathlib.Path(self.sw("run", "new", "contract", cwd=self.work).strip())
+        self.suite = "$ python3 -m unittest discover -s tests"
+        (self.run / "plan.md").write_text(f"# Goal: fix page_count\nMust not: edit tests\n1. fix | check: {self.suite}\nOutward: none\n")
+        self.verdict = self.run / "checks" / "step-1-review.md"
+
+    def fix(self):
+        (self.work / "mod.py").write_text('"""Pages are numbered from 1; out of range raises IndexError."""\n\ndef page_count(n, size):\n    return -(-n // size)\n')
+
+    def test_done_waits_for_the_reviewer_when_source_changed_and_the_check_is_the_suite(self):
+        self.fix()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        msg = str(cm.exception)
+        self.assertIn("review", msg)
+        self.assertIn("mod.py", msg)
+        packet = self.sw("run", "review", "latest", "1", cwd=self.work)
+        self.assertIn("mod.py", packet)
+        self.assertIn("-(-n // size)", packet)
+        self.assertIn("document", packet)
+        self.verdict.parent.mkdir(exist_ok=True)
+        self.verdict.write_text("PASS: the change rounds up; IndexError is not touched by this step\n")
+        out = self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={self.verdict}", cwd=self.work)
+        self.assertIn("review", out)
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+        events = [json.loads(l) for l in (self.run / "log.jsonl").read_text().splitlines() if l.strip()]
+        self.assertTrue(any(e.get("review") == "pass" and e.get("step") == "1" for e in events))
+        # the review verdict is not the step's pass: only the certificate is
+        self.assertFalse(any(e.get("result") == "pass" and not e.get("certified") for e in events))
+
+    def test_no_source_change_needs_no_reviewer(self):
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_a_check_that_is_not_the_suite_needs_no_reviewer(self):
+        (self.run / "plan.md").write_text("# Goal: g\nMust not: x\n1. fix | check: $ true\nOutward: none\n")
+        self.fix()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_a_verdict_must_be_the_file_the_packet_names(self):
+        self.fix()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "log", "latest", "step=1", "result=pass", self.evidence(), cwd=self.work)
+        self.assertIn("not evidence", str(cm.exception))
+
+    def test_a_failed_review_blocks_done(self):
+        self.fix()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.verdict.parent.mkdir(exist_ok=True)
+        self.verdict.write_text("FAIL: page() still does not raise IndexError as documented\n")
+        self.sw("run", "log", "latest", "step=1", "result=fail", f"evidence={self.verdict}", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("reviewer", str(cm.exception))
+
+    def test_a_verdict_written_before_the_last_change_is_stale(self):
+        self.fix()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.verdict.parent.mkdir(exist_ok=True)
+        self.verdict.write_text("PASS\n")
+        self.sw("run", "log", "latest", "step=1", "result=pass", f"evidence={self.verdict}", cwd=self.work)
+        (self.work / "mod.py").write_text('"""doc"""\n\ndef page_count(n, size):\n    return max(1, -(-n // size))\n')
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+    def test_only_test_files_changed_needs_no_reviewer(self):
+        (self.work / "tests" / "test_more.py").write_text("import unittest\nclass U(unittest.TestCase):\n    def test_ok(self):\n        pass\n")
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("certified", self.sw("run", "done", "latest", "1", cwd=self.work))
+
+    def test_inside_a_git_repository_the_same_rule_holds(self):
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+        subprocess.run([*git, "init", "-q"], cwd=self.work, check=True)
+        subprocess.run([*git, "add", "-A"], cwd=self.work, check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "base"], cwd=self.work, check=True)
+        run = pathlib.Path(self.sw("run", "new", "gitcontract", cwd=self.work).strip())
+        (run / "plan.md").write_text(f"# Goal: fix page_count\nMust not: edit tests\n1. fix | check: {self.suite}\nOutward: none\n")
+        self.fix()
+        self.sw("run", "check", "latest", "1", cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "done", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+
+class ThreeCallTests(SwTestCase):
+    """A small task in three sw calls: `run new --goal <text> --plan <file> --freeze <paths>`,
+    `run prove`, `run finish` (pilot 5: six calls per run, and a third of runs skipped them)."""
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(self.tmp.name) / "work"
+        (self.work / "tests").mkdir(parents=True)
+        (self.work / "tests" / "t.sh").write_text("exit 0\n")
+        self.plan = self.work / "plan.txt"
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ sh tests/t.sh\nOutward: none\n")
+
+    def test_new_with_goal_text_creates_the_goal_and_binds_it(self):
+        run = pathlib.Path(self.sw("run", "new", "ship", "--goal", "Ship the thing", cwd=self.work).strip())
+        self.assertTrue(run.is_dir())
+        self.assertIn("Ship the thing", self.sw("goal", "list"))
+        start = json.loads((run / "log.jsonl").read_text().splitlines()[0])
+        self.assertEqual(start["goal"], "1")
+
+    def test_new_with_a_goal_id_keeps_binding_by_id(self):
+        self.sw("goal", "add", "Existing")
+        run = pathlib.Path(self.sw("run", "new", "ship", "--goal", "1", cwd=self.work).strip())
+        start = json.loads((run / "log.jsonl").read_text().splitlines()[0])
+        self.assertEqual(start["goal"], "1")
+        self.assertEqual(self.sw("goal", "list").count("Existing"), 1)
+
+    def test_new_with_an_unknown_goal_id_is_refused(self):
+        with self.assertRaises(Failed):
+            self.sw("run", "new", "ship", "--goal", "42", cwd=self.work)
+
+    def test_new_with_plan_and_freeze_writes_both(self):
+        run = pathlib.Path(self.sw("run", "new", "ship", "--goal", "G", "--plan", str(self.plan), "--freeze", "tests/t.sh", cwd=self.work).strip())
+        self.assertEqual((run / "plan.md").read_text(), self.plan.read_text())
+        events = [json.loads(l) for l in (run / "log.jsonl").read_text().splitlines() if l.strip()]
+        self.assertTrue(any(e.get("event") == "freeze" for e in events))
+        (self.work / "tests" / "t.sh").write_text("exit 0 # changed\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "check", "latest", "1", cwd=self.work)
+        self.assertIn("tampered", str(cm.exception))
+
+    def test_new_with_plan_from_stdin(self):
+        r = subprocess.run([SW, "run", "new", "ship", "--plan", "-"], input=self.plan.read_text(), env=self.env, capture_output=True, text=True, cwd=self.work)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((pathlib.Path(r.stdout.strip()) / "plan.md").read_text(), self.plan.read_text())
+
+    def test_new_refuses_a_plan_without_a_checked_step(self):
+        bad = self.work / "bad.txt"
+        bad.write_text("# Goal: g\n- do things\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "new", "ship", "--plan", str(bad), cwd=self.work)
+        self.assertIn("check:", str(cm.exception))
+
+    def test_prove_checks_and_certifies_in_one_call(self):
+        self.sw("run", "new", "ship", "--plan", str(self.plan), "--freeze", "tests/t.sh", cwd=self.work)
+        out = self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.assertIn("check passed", out)
+        self.assertIn("certified", out)
+
+    def test_prove_stops_at_a_failing_check(self):
+        (self.work / "tests" / "t.sh").write_text("exit 1\n")
+        run = pathlib.Path(self.sw("run", "new", "ship", "--plan", str(self.plan), cwd=self.work).strip())
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.assertIn("check failed", str(cm.exception))
+        events = [json.loads(l) for l in (run / "log.jsonl").read_text().splitlines() if l.strip()]
+        self.assertTrue(any(e.get("event") == "receipt" and e.get("ok") is False for e in events))
+        self.assertFalse(any(e.get("certified") for e in events))
+
+    def test_prove_carries_the_review_requirement(self):
+        (self.work / "mod.py").write_text("X = 1\n")
+        (self.work / "tests" / "test_x.py").write_text("import unittest\nfrom mod import X\nclass T(unittest.TestCase):\n    def test_x(self):\n        self.assertEqual(X, 2)\n")
+        self.plan.write_text("# Goal: g\nMust not: x\n1. a | check: $ python3 -m unittest discover -s tests\nOutward: none\n")
+        self.sw("run", "new", "ship", "--plan", str(self.plan), cwd=self.work)
+        (self.work / "mod.py").write_text("X = 2\n")
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "prove", "latest", "1", cwd=self.work)
+        self.assertIn("review", str(cm.exception))
+
+    def test_finish_closes_the_goal_and_adds_a_notify_card(self):
+        self.sw("run", "new", "ship", "--goal", "Ship it", "--plan", str(self.plan), cwd=self.work)
+        self.sw("run", "prove", "latest", "1", cwd=self.work)
+        out = self.sw("run", "finish", "latest", "Shipped: tests pass (1 passed).", cwd=self.work)
+        self.assertIn("notify", out)
+        self.assertIn("(done)", self.sw("goal", "list", "--all"))
+        self.assertIn("Shipped", self.sw("inbox", "list"))
+
+    def test_finish_refuses_while_a_step_is_unproven(self):
+        self.sw("run", "new", "ship", "--goal", "Ship it", "--plan", str(self.plan), cwd=self.work)
+        with self.assertRaises(Failed) as cm:
+            self.sw("run", "finish", "latest", "done", cwd=self.work)
+        self.assertIn("step 1", str(cm.exception))
+        self.assertNotIn("(done)", self.sw("goal", "list", "--all"))
