@@ -4609,7 +4609,26 @@ fn tool(store: &Store, cmd: ToolCmd) -> Result<()> {
     Ok(())
 }
 
+/// Rust ignores SIGPIPE, so `sw … | head -1` would panic with "failed printing to stdout" once
+/// the reader is gone. Restoring the default action ends the process quietly, as any shell tool.
+#[cfg(unix)]
+fn quiet_on_closed_pipe() {
+    extern "C" {
+        fn signal(sig: i32, handler: usize) -> usize;
+    }
+    const SIGPIPE: i32 = 13;
+    const SIG_DFL: usize = 0;
+    // SAFETY: resets one signal disposition before any other thread or I/O exists.
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn quiet_on_closed_pipe() {}
+
 fn main() -> ExitCode {
+    quiet_on_closed_pipe();
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
