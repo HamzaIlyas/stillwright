@@ -3011,3 +3011,22 @@ class ReviewRoundEightTests(SwTestCase):
         out = self.sw("run", "review", "latest", "1", cwd=self.repo)
         self.assertIn("old.py (removed)", out)
         self.assertIn("-OLD = 1", out)
+
+
+class PipeTests(SwTestCase):
+    """`sw … | head -1` must end quietly when the reader goes away, not panic with exit 101."""
+
+    @unittest.skipIf(os.name == "nt", "no SIGPIPE on Windows; a closed pipe still panics there (known limit)")
+    def test_closed_stdout_does_not_panic(self):
+        for i in range(300):
+            self.sw("goal", "add", f"goal {i} with a title long enough to fill the pipe buffer")
+        proc = subprocess.Popen(
+            [SW, "goal", "list"], env=self.env, cwd=self.default_cwd,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        proc.stdout.close()
+        err = proc.stderr.read().decode()
+        proc.wait(timeout=60)
+        self.assertNotIn("panicked", err)
+        self.assertNotIn("Broken pipe", err)
+        self.assertNotEqual(proc.returncode, 101)
