@@ -37,5 +37,8 @@ The same unattended rules apply: no pushes, deploys, publishing or new tools wit
   reports junctions as symlinks too, so they should get the same treatment; we have not
   tested this on Windows.
 - The symlink test in the suite is skipped on Windows (creating symlinks needs privileges).
+- Windows has no SIGPIPE, so `sw … | head -1` still panics there when the reader closes the pipe
+  early ("failed printing to stdout", exit 101). On unix the process ends quietly since 0.3.0. The
+  pipe test is skipped on Windows.
 - Paths in run references: a bare word is a run name or slug; to pass a folder, include a
   separator (`.\runs\...` or a full path).

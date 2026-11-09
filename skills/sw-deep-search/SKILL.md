@@ -4,7 +4,7 @@ description: Advanced research that ends in verified answers, not link dumps. Sp
 license: MIT
 metadata:
   author: Hamza Ilyas
-  version: "0.2.2"
+  version: "0.3.0"
 ---
 
 # Deep search
