@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 - 2026-11-21
+
+- Release: the macOS arm64 build runs on `macos-15`. GitHub retired the `macos-14` runner, so the v0.3.0 tag published only PyPI wheels; 0.3.1 ships the same code with every binary, the GitHub release and the Homebrew formula. No behaviour change.
+
 ## 0.3.0 - 2026-11-10
 - `sw … | head -1` ends quietly when the reader goes away: `main` restores the default SIGPIPE action on unix, so a closed pipe no longer panics with "failed printing to stdout" and exit 101. Black-box test added. Known limit: Windows has no SIGPIPE, and a closed pipe still panics there.
 - One hash for the receipt and the review: `sw run check` and `sw run done` hash exactly the files the review covers (`dir:<sha256>` over the run folder's listing: inside git every tracked file, submodules included, plus untracked files and nested repositories that are not host noise; outside git a walk that skips host folders and noise). sw refuses from a sibling folder. What the receipt binds is what the reviewer sees, in git or not; a tracked log fixture is bound, an untracked host log is not. A file that cannot be read refuses the check (a blind receipt is no receipt). Pilot 5 had every receipt on tree `none`. Snapshots still use git's full tree.

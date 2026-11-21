@@ -21,3 +21,7 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
+
+[dist.github-custom-runners]
+# GitHub retired the macos-14 image: the v0.3.0 arm build was cancelled with 0 steps.
+aarch64-apple-darwin = "macos-15"
